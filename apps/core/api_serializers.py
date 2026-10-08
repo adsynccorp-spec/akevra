@@ -124,3 +124,74 @@ class PasswordCodeSerializer(PasswordForgotSerializer):
 
 class PasswordResetSerializer(PasswordCodeSerializer):
     password = serializers.CharField(write_only=True)
+
+
+# ---------------------------------------------------------------------------
+# Monthly Work & Hours
+# ---------------------------------------------------------------------------
+
+class CycleCreateSerializer(serializers.Serializer):
+    year = serializers.IntegerField(min_value=2000, max_value=2100)
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    fieldwork_type = serializers.ChoiceField(
+        choices=["supervised", "concentrated"], required=False, allow_blank=True,
+        help_text="Supervised Fieldwork only; defaults to the relationship's subtype",
+    )
+
+
+class CyclePatchSerializer(serializers.Serializer):
+    fieldwork_type = serializers.ChoiceField(choices=["supervised", "concentrated"])
+
+
+class AssignmentCreateSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    instructions = serializers.CharField(required=False, allow_blank=True)
+    due_on = serializers.DateField(required=False, allow_null=True)
+    year = serializers.IntegerField(required=False, min_value=2000, max_value=2100, help_text="Cycle year; defaults to the due date's month")
+    month = serializers.IntegerField(required=False, min_value=1, max_value=12)
+
+
+class AssignmentSubmitSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True)
+    files = serializers.ListField(child=serializers.FileField(), required=False, help_text="Up to 5 files, multipart/form-data")
+
+
+class AssignmentReviewSerializer(serializers.Serializer):
+    comment = serializers.CharField(required=False, allow_blank=True, help_text="Required when requesting a revision")
+
+
+class HoursCreateSerializer(serializers.Serializer):
+    occurred_on = serializers.DateField()
+    hours = serializers.DecimalField(max_digits=6, decimal_places=2)
+    kind = serializers.ChoiceField(choices=["independent", "supervision"])
+    supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
+    client_observation = serializers.BooleanField(required=False, default=False)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class HoursPatchSerializer(serializers.Serializer):
+    occurred_on = serializers.DateField(required=False)
+    hours = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
+    kind = serializers.ChoiceField(choices=["independent", "supervision"], required=False)
+    supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
+    client_observation = serializers.BooleanField(required=False)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class HoursReturnSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+
+
+class SessionCreateSerializer(serializers.Serializer):
+    occurred_on = serializers.DateField()
+    duration_minutes = serializers.IntegerField(min_value=1, max_value=1440)
+    session_type = serializers.ChoiceField(choices=["individual", "group"])
+    client_observation = serializers.BooleanField(required=False, default=False)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class ServiceHoursSerializer(serializers.Serializer):
+    year = serializers.IntegerField(min_value=2000, max_value=2100)
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    hours = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0)
+    notes = serializers.CharField(required=False, allow_blank=True)

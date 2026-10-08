@@ -143,6 +143,12 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+# Uploaded files (assignment submissions). Served only through the authenticated download
+# endpoint, never as public media. On Railway, mount a persistent volume at MEDIA_ROOT —
+# the container filesystem is wiped on every deploy.
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
+MEDIA_URL = "media/"
+ASSIGNMENT_ATTACHMENT_MAX_BYTES = int(os.getenv("ASSIGNMENT_ATTACHMENT_MAX_MB", "10")) * 1024 * 1024
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",

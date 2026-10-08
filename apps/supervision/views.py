@@ -120,8 +120,16 @@ def serialize_relationship(rel, viewer=None):
                 "idp.manage",
                 "idp.view",
                 "session.document",
-                "hours.verify",
+                "session.view",
+                "cycle.view",
+                "cycle.manage",
+                "compliance.view",
+                "assignment.create",
                 "assignment.submit",
+                "assignment.review",
+                "hours.log",
+                "hours.verify",
+                "service_hours.attest",
                 "clinical.view",
             )
         }

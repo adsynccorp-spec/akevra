@@ -423,7 +423,23 @@ class DevelopmentPlanMilestone(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiv
         return super().save(*args, **kwargs)
 
 
+# Tracks whose supervision hours are self-logged by the trainee and verified by the Supervisor
+SELF_LOGGED_HOURS_TRACKS = frozenset({SupervisionTrack.SUPERVISED_FIELDWORK})
+# Tracks whose supervision hours come only from Supervisor-authored session records, measured
+# against the Supervisee's self-attested monthly service hours
+SESSION_DERIVED_HOURS_TRACKS = frozenset(
+    {SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING}
+)
+
+
+def _same_month(day, cycle, label):
+    if day and (day.year, day.month) != (cycle.year, cycle.month):
+        raise ValidationError(f"{label} must fall within the cycle month ({cycle.year}-{cycle.month:02d}).")
+
+
 class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """One relationship's month: its assignments, logged hours and supervision sessions."""
+
     relationship = models.ForeignKey(
         SupervisoryRelationship,
         on_delete=models.PROTECT,
@@ -432,9 +448,18 @@ class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
     year = models.PositiveIntegerField()
     month = models.PositiveSmallIntegerField()
     status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
+    # Supervised Fieldwork only: each month is either supervised or concentrated, so a
+    # relationship can mix the two across months
+    fieldwork_type = models.CharField(
+        max_length=32,
+        choices=FieldworkSubtype.choices,
+        blank=True,
+        default="",
+    )
 
     class Meta:
         db_table = "monthly_cycle"
+        ordering = ["year", "month"]
         constraints = [
             models.UniqueConstraint(
                 fields=["relationship", "year", "month"],
@@ -442,20 +467,99 @@ class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
             )
         ]
 
+    def clean(self):
+        if not 1 <= self.month <= 12:
+            raise ValidationError("Month must be between 1 and 12.")
+        is_fieldwork = self.relationship.supervision_track == SupervisionTrack.SUPERVISED_FIELDWORK
+        if self.fieldwork_type and not is_fieldwork:
+            raise ValidationError("Fieldwork type applies only to Supervised Fieldwork relationships.")
+        if is_fieldwork and not self.fieldwork_type:
+            raise ValidationError("A Supervised Fieldwork month must be supervised or concentrated.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class AssignmentStatus(models.TextChoices):
+    ISSUED = "issued", "Issued"
+    SUBMITTED = "submitted", "Submitted"
+    REVISION_REQUESTED = "revision_requested", "Revision Requested"
+    COMPLETED = "completed", "Completed"
+
 
 class Assignment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
     cycle = models.ForeignKey(MonthlyCycle, on_delete=models.PROTECT, related_name="assignments")
     title = models.CharField(max_length=255)
     instructions = models.TextField(blank=True, default="")
-    status = models.CharField(max_length=32, default="issued")
+    status = models.CharField(max_length=32, choices=AssignmentStatus.choices, default=AssignmentStatus.ISSUED)
     evidence_notes = models.TextField(blank=True, default="")
+    due_on = models.DateField(null=True, blank=True)
+    issued_by = models.ForeignKey(
+        "accounts.UserAccount",
+        on_delete=models.PROTECT,
+        related_name="issued_assignments",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         db_table = "assignment"
+        ordering = ["created_at"]
+
+
+class AssignmentEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Every lifecycle state an assignment passes through, in order. Never edited."""
+
+    assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT, related_name="events")
+    from_status = models.CharField(max_length=32, choices=AssignmentStatus.choices, blank=True, default="")
+    to_status = models.CharField(max_length=32, choices=AssignmentStatus.choices)
+    actor = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="assignment_events")
+    comment = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "assignment_event"
+        ordering = ["created_at"]
+
+
+def _attachment_path(instance, filename):
+    return f"assignments/{instance.organization_id}/{instance.assignment_id}/{instance.id}_{filename}"
+
+
+class AssignmentAttachment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A file submitted with an assignment. Tied to the submission event it arrived with."""
+
+    assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT, related_name="attachments")
+    event = models.ForeignKey(AssignmentEvent, on_delete=models.PROTECT, related_name="attachments")
+    file = models.FileField(upload_to=_attachment_path, max_length=500)
+    original_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=128, blank=True, default="")
+    size_bytes = models.PositiveIntegerField()
+    uploaded_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="assignment_attachments")
+
+    class Meta:
+        db_table = "assignment_attachment"
+        ordering = ["created_at"]
+
+
+class HoursKind(models.TextChoices):
+    INDEPENDENT = "independent", "Independent Fieldwork"
+    SUPERVISION = "supervision", "Supervision"
+
+
+class SupervisionFormat(models.TextChoices):
+    INDIVIDUAL = "individual", "Individual"
+    GROUP = "group", "Group"
+
+
+class HoursStatus(models.TextChoices):
+    PENDING = "pending", "Pending Review"
+    VERIFIED = "verified", "Verified"
+    RETURNED = "returned", "Returned for Correction"
 
 
 class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """Trainee fieldwork hours — self-logged, then supervisor-verified.
+    """Trainee fieldwork hours — self-logged, then supervisor-verified. Only verified hours count.
 
     RBT ongoing-supervision hours are derived from session records, not this table.
     """
@@ -463,15 +567,65 @@ class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
     cycle = models.ForeignKey(MonthlyCycle, on_delete=models.PROTECT, related_name="hours_entries")
     hours = models.DecimalField(max_digits=6, decimal_places=2)
     attested_on = models.DateField()
+    occurred_on = models.DateField()
+    kind = models.CharField(max_length=32, choices=HoursKind.choices, default=HoursKind.INDEPENDENT)
+    supervision_format = models.CharField(max_length=32, choices=SupervisionFormat.choices, blank=True, default="")
+    client_observation = models.BooleanField(default=False)
+    notes = models.TextField(blank=True, default="")
+    logged_by = models.ForeignKey(
+        "accounts.UserAccount",
+        on_delete=models.PROTECT,
+        related_name="logged_hours",
+        null=True,
+        blank=True,
+    )
+    status = models.CharField(max_length=32, choices=HoursStatus.choices, default=HoursStatus.PENDING)
+    return_reason = models.TextField(blank=True, default="")
     verified = models.BooleanField(default=False)
     verified_at = models.DateTimeField(null=True, blank=True)
+    verified_by = models.ForeignKey(
+        "accounts.UserAccount",
+        on_delete=models.PROTECT,
+        related_name="verified_hours",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         db_table = "hours_entry"
+        ordering = ["occurred_on", "created_at"]
+
+    def clean(self):
+        relationship = self.cycle.relationship
+        if relationship.supervision_track not in SELF_LOGGED_HOURS_TRACKS:
+            raise ValidationError(
+                "Self-logged hours apply only to Supervised Fieldwork. RBT ongoing-supervision hours "
+                "are derived from Supervisor-authored session records."
+            )
+        if self.logged_by_id and self.logged_by_id != relationship.supervisee_id:
+            raise ValidationError("Fieldwork hours are logged by the Supervisee.")
+        if self.hours is None or not 0 < self.hours <= 24:
+            raise ValidationError("Hours must be more than 0 and no more than 24 for one day.")
+        _same_month(self.occurred_on, self.cycle, "The date worked")
+        if self.kind == HoursKind.SUPERVISION:
+            if not self.supervision_format:
+                raise ValidationError("Supervision hours must be individual or group.")
+        elif self.supervision_format or self.client_observation:
+            raise ValidationError("Format and client observation apply only to supervision hours.")
+        self.verified = self.status == HoursStatus.VERIFIED
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class SessionType(models.TextChoices):
+    INDIVIDUAL = "individual", "Individual Supervision"
+    GROUP = "group", "Group Supervision"
 
 
 class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """Compliance-bearing session documentation. Scheduling never grants credit."""
+    """Compliance-bearing session documentation, authored by the Supervisor. Scheduling never grants credit."""
 
     cycle = models.ForeignKey(
         MonthlyCycle, on_delete=models.PROTECT, related_name="sessions"
@@ -479,6 +633,8 @@ class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
     occurred_on = models.DateField()
     duration_minutes = models.PositiveIntegerField()
     notes = models.TextField(blank=True, default="")
+    session_type = models.CharField(max_length=32, choices=SessionType.choices, default=SessionType.INDIVIDUAL)
+    client_observation = models.BooleanField(default=False)
     documented_by = models.ForeignKey(
         "accounts.UserAccount",
         on_delete=models.PROTECT,
@@ -487,6 +643,51 @@ class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
 
     class Meta:
         db_table = "supervision_session"
+        ordering = ["occurred_on", "created_at"]
+
+    def clean(self):
+        if self.documented_by_id != self.cycle.relationship.supervisor_id:
+            raise ValidationError("Supervision sessions are documented by the relationship's Supervisor.")
+        if not self.duration_minutes or self.duration_minutes > 24 * 60:
+            raise ValidationError("Duration must be between 1 minute and 24 hours.")
+        _same_month(self.occurred_on, self.cycle, "The session date")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ServiceHoursAttestation(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """The Supervisee's self-attested service hours for one month (RBT / BCaBA ongoing supervision).
+    The denominator of the supervision percentage; never mixed with fieldwork hours."""
+
+    cycle = models.ForeignKey(MonthlyCycle, on_delete=models.PROTECT, related_name="service_attestations")
+    hours = models.DecimalField(max_digits=7, decimal_places=2)
+    attested_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="service_attestations")
+    attested_on = models.DateField()
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "service_hours_attestation"
+        constraints = [
+            models.UniqueConstraint(fields=["cycle"], name="unique_service_attestation_per_cycle"),
+        ]
+
+    def clean(self):
+        relationship = self.cycle.relationship
+        if relationship.supervision_track not in SESSION_DERIVED_HOURS_TRACKS:
+            raise ValidationError(
+                "Monthly service hours are attested only on RBT or BCaBA ongoing supervision. "
+                "Supervised Fieldwork hours are logged and verified instead."
+            )
+        if self.attested_by_id != relationship.supervisee_id:
+            raise ValidationError("Monthly service hours are attested by the Supervisee.")
+        if self.hours is None or not 0 <= self.hours <= 744:
+            raise ValidationError("Service hours must be between 0 and 744 for one month.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class Appointment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
