@@ -329,8 +329,9 @@ class MonthlyWorkAcceptanceTests(TestCase):
         cumulative = summary["cumulative"]
         self.assertEqual(cumulative["supervised_hours"], 100.0)
         self.assertEqual(cumulative["concentrated_hours"], 100.0)
-        # 100/2000 + 100/1500 = 5% + 6.67%
-        self.assertEqual(cumulative["percent_complete"], 11.67)
+        # Mixed types: 100 supervised + 100 concentrated x 1.33 = 233 of 2,000
+        self.assertEqual(cumulative["combined_hours"], 233.0)
+        self.assertEqual(cumulative["percent_complete"], 11.65)
         self.assertFalse(july["rules"]["approved"])
 
         # An approved rule set replaces the defaults from its effective date, with no code change
@@ -355,9 +356,12 @@ class MonthlyWorkAcceptanceTests(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Calculation test-case set. BACB-based placeholders until AKEVRA supplies and approves
-# its own set: replace or extend the rows below, the assertions stay the same.
+# Calculation test-case set, built from the BACB handbooks (updated 06/2026). AKEVRA can
+# replace or extend the rows below with its own approved cases; the assertions stay the same.
 # ---------------------------------------------------------------------------
+
+D2026 = date(2026, 10, 1)
+D2027 = date(2027, 1, 1)
 
 RBT_CASES = [
     # id, service_hours, supervision_minutes, contacts, individual, observation, expected
@@ -372,28 +376,45 @@ RBT_CASES = [
 ]
 
 FIELDWORK_MONTH_CASES = [
-    # id, type, total, supervision, group, contacts, observation, expected
-    ("F1 supervised 5%", "supervised", 100, 5, 2, 4, 1, {"status": "met", "supervision_percent": 5.0, "countable_hours": 100.0}),
-    ("F2 supervised 4.99%", "supervised", 100, "4.99", 0, 4, 1, {"status": "shortfall", "countable_hours": 0.0}),
-    ("F3 concentrated 10%", "concentrated", 100, 10, 0, 6, 1, {"status": "met", "supervision_percent": 10.0}),
-    ("F4 concentrated 8%", "concentrated", 100, 8, 0, 6, 1, {"status": "shortfall", "remaining_supervision_hours": 2.0}),
-    ("F5 concentrated 5 contacts", "concentrated", 100, 10, 0, 5, 1, {"status": "shortfall"}),
-    ("F6 under 20 h", "supervised", 15, 1, 0, 4, 1, {"status": "shortfall"}),
-    ("F7 over 130 h", "supervised", 140, 7, 0, 4, 1, {"status": "shortfall"}),
-    ("F8 group over 50%", "supervised", 100, 5, 3, 4, 1, {"status": "shortfall"}),
-    ("F9 group exactly 50%", "supervised", 100, 5, "2.5", 4, 1, {"status": "met"}),
-    ("F10 no observation", "supervised", 100, 5, 0, 4, 0, {"status": "shortfall"}),
+    # id, rules date, type, total, supervision, group, contacts, observation, expected
+    ("F1 supervised 5%", D2026, "supervised", 100, 5, 2, 4, 1, {"status": "met", "supervision_percent": 5.0, "eligible_hours": 100.0}),
+    ("F2 supervised 4.99%: independent trimmed", D2026, "supervised", 100, "4.99", 0, 4, 1, {"status": "shortfall", "eligible_hours": 99.8}),
+    ("F3 concentrated 10%", D2026, "concentrated", 100, 10, 0, 6, 1, {"status": "met", "eligible_hours": 100.0}),
+    ("F4 concentrated 8%: no adjusting", D2026, "concentrated", 100, 8, 0, 6, 1, {"status": "shortfall", "eligible_hours": 0.0, "remaining_supervision_hours": 2.0}),
+    ("F5 concentrated 5 contacts", D2026, "concentrated", 100, 10, 0, 5, 1, {"status": "shortfall", "eligible_hours": 0.0}),
+    ("F6 under 20 h", D2026, "supervised", 15, 1, 0, 4, 1, {"status": "shortfall", "eligible_hours": 0.0}),
+    ("F7 over 130 h: trimmed to 130", D2026, "supervised", 140, 7, 0, 4, 1, {"status": "shortfall", "eligible_hours": 130.0}),
+    ("F8 group over 50%: group cut, then %", D2026, "supervised", 100, 5, 3, 4, 1, {"status": "shortfall", "eligible_hours": 80.0}),
+    ("F9 group exactly 50%", D2026, "supervised", 100, 5, "2.5", 4, 1, {"status": "met", "eligible_hours": 100.0}),
+    ("F10 no observation", D2026, "supervised", 100, 5, 0, 4, 0, {"status": "shortfall", "eligible_hours": 0.0}),
+    ("F11 BACB example: 2 of 4 contacts", D2026, "supervised", 110, "5.5", 0, 2, 1, {"status": "shortfall", "eligible_hours": 55.0}),
+    ("F12 2027 concentrated 7.5%", D2027, "concentrated", 100, "7.5", 0, 0, 1, {"status": "met", "eligible_hours": 100.0}),
+    ("F13 2027 up to 160 h", D2027, "supervised", 150, "7.5", 0, 0, 1, {"status": "met", "eligible_hours": 150.0}),
 ]
 
 CUMULATIVE_CASES = [
-    # id, [(type, countable hours)], expected
+    # id, [(type, eligible hours)], expected
     ("C1 supervised only", [("supervised", 2000)], {"percent_complete": 100.0, "complete": True}),
     ("C2 concentrated only", [("concentrated", 1500)], {"percent_complete": 100.0, "complete": True}),
-    ("C3 mixed half and half", [("supervised", 1000), ("concentrated", 750)], {"percent_complete": 100.0, "complete": True}),
+    ("C3 mixed: 1000 + 750 x 1.33 falls short", [("supervised", 1000), ("concentrated", 750)],
+     {"combined_hours": 1997.5, "complete": False, "remaining_if_supervised": 2.5}),
     ("C4 mixed partial", [("supervised", 1000), ("concentrated", 300)],
-     {"percent_complete": 70.0, "remaining_if_supervised": 600.0, "remaining_if_concentrated": 450.0, "complete": False}),
+     {"combined_hours": 1399.0, "percent_complete": 69.95, "remaining_if_supervised": 601.0, "remaining_if_concentrated": 451.88}),
     ("C5 over-accrued caps at 100", [("supervised", 2100)], {"percent_complete": 100.0}),
     ("C6 nothing yet", [], {"percent_complete": 0.0, "remaining_if_supervised": 2000.0}),
+    ("C7 mixed complete", [("supervised", 1000), ("concentrated", 752)], {"complete": True}),
+]
+
+BCABA_CASES = [
+    # id, rules date, inputs, expected
+    ("B1 first 1,000 h at 5%", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=150, second_half_minutes=150, quarter_observations=1), {"status": "met", "required_supervision_percent": 5.0}),
+    ("B2 after 1,000 h drops to 2%", D2026, dict(service_hours=100, supervision_minutes=120, contacts=1, prior_service_hours=1200, quarter_observations=1), {"status": "met", "required_supervision_percent": 2.0}),
+    ("B3 5% tier, nothing in second half", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=300, second_half_minutes=0, quarter_observations=1), {"status": "shortfall"}),
+    ("B4 group more than individual", D2026, dict(service_hours=100, supervision_minutes=300, group_minutes=200, contacts=2, first_half_minutes=150, second_half_minutes=150, quarter_observations=1), {"status": "shortfall"}),
+    ("B5 quarter ends without observation", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=150, second_half_minutes=150, quarter_observations=0, quarter_end=True), {"status": "shortfall"}),
+    ("B6 observation not yet due", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=150, second_half_minutes=150, quarter_observations=0), {"status": "met"}),
+    ("B7 no services this month", D2026, dict(service_hours=0, supervision_minutes=0, contacts=0), {"status": "no_service_hours", "met": True}),
+    ("B8 2027 flat 5% even after 1,000 h", D2027, dict(service_hours=100, supervision_minutes=120, contacts=1, prior_service_hours=1200, quarter_observations=1), {"status": "shortfall", "required_supervision_percent": 5.0}),
 ]
 
 
@@ -403,7 +424,7 @@ class CalculationCaseTests(SimpleTestCase):
             self.assertEqual(actual[key], value, f"{case_id}: {key}")
 
     def test_rbt_ongoing_cases(self):
-        rules = default_rules(SupervisionTrack.RBT_ONGOING)
+        rules = default_rules(SupervisionTrack.RBT_ONGOING, D2026)
         for case_id, service, minutes, contacts, individual, observation, expected in RBT_CASES:
             with self.subTest(case_id):
                 result = evaluate_ongoing_month(
@@ -413,9 +434,9 @@ class CalculationCaseTests(SimpleTestCase):
                 self.assertSubset(expected, result, case_id)
 
     def test_fieldwork_month_cases(self):
-        rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK)
-        for case_id, kind, total, supervision, group, contacts, observation, expected in FIELDWORK_MONTH_CASES:
+        for case_id, on, kind, total, supervision, group, contacts, observation, expected in FIELDWORK_MONTH_CASES:
             with self.subTest(case_id):
+                rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK, on)
                 result = evaluate_fieldwork_month(
                     rules, kind, total_hours=total, supervision_hours=supervision, group_hours=group,
                     contacts=contacts, observation_contacts=observation,
@@ -423,7 +444,14 @@ class CalculationCaseTests(SimpleTestCase):
                 self.assertSubset(expected, result, case_id)
 
     def test_fieldwork_cumulative_cases(self):
-        rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK)
+        rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK, D2026)
         for case_id, months, expected in CUMULATIVE_CASES:
             with self.subTest(case_id):
                 self.assertSubset(expected, evaluate_fieldwork_cumulative(rules, months), case_id)
+
+    def test_bcaba_ongoing_cases(self):
+        defaults = dict(individual_contacts=1, observation_contacts=0)
+        for case_id, on, inputs, expected in BCABA_CASES:
+            with self.subTest(case_id):
+                rules = default_rules(SupervisionTrack.BCABA_ONGOING, on)
+                self.assertSubset(expected, evaluate_ongoing_month(rules, **{**defaults, **inputs}), case_id)
