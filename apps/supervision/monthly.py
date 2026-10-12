@@ -14,13 +14,18 @@ from apps.supervision.models import (
     AssignmentAttachment,
     AssignmentEvent,
     AssignmentStatus,
+    DevelopmentPlanCompetency,
+    DevelopmentPlanGoal,
     FieldworkSubtype,
     HoursEntry,
     HoursStatus,
     SELF_LOGGED_HOURS_TRACKS,
     SESSION_DERIVED_HOURS_TRACKS,
     MonthlyCycle,
+    RelationshipNote,
     ServiceHoursAttestation,
+    SessionAttachment,
+    SessionStatus,
     SupervisionSession,
     SupervisionTrack,
 )
@@ -32,6 +37,7 @@ MAX_ATTACHMENTS_PER_SUBMISSION = 5
 
 # Which state each assignment state may move to
 ASSIGNMENT_TRANSITIONS = {
+    AssignmentStatus.DRAFT: {AssignmentStatus.ISSUED},
     AssignmentStatus.ISSUED: {AssignmentStatus.SUBMITTED},
     AssignmentStatus.SUBMITTED: {AssignmentStatus.REVISION_REQUESTED, AssignmentStatus.COMPLETED},
     AssignmentStatus.REVISION_REQUESTED: {AssignmentStatus.SUBMITTED},
@@ -100,7 +106,10 @@ def _record(assignment, actor, to_status, comment=""):
     return AssignmentEvent.objects.create(
         organization=assignment.organization,
         assignment=assignment,
-        from_status="" if to_status == AssignmentStatus.ISSUED else assignment.status,
+        from_status=(
+            "" if to_status == AssignmentStatus.ISSUED and assignment.status != AssignmentStatus.DRAFT
+            else assignment.status
+        ),
         to_status=to_status,
         actor=actor,
         comment=comment or "",
@@ -115,24 +124,78 @@ def _move(assignment, to_status):
         )
 
 
-def issue_assignment(relationship, actor, *, title, instructions="", due_on=None, year=None, month=None):
-    if not (title or "").strip():
+ASSIGNMENT_FIELDS = (
+    "title", "description", "instructions", "due_on", "assigned_on",
+    "related_goal_id", "related_competency_id",
+    "requires_written_response", "requires_file", "requires_evidence",
+)
+
+
+def _check_assignment(relationship, assignment):
+    if not (assignment.title or "").strip():
         raise ValidationError("An assignment title is required.")
+    if assignment.due_on and assignment.assigned_on and assignment.due_on < assignment.assigned_on:
+        raise ValidationError("The due date can't be before the assigned date.")
+    # Goals and competencies must come from this relationship's development plan
+    if assignment.related_goal_id and not DevelopmentPlanGoal.objects.filter(
+        pk=assignment.related_goal_id, plan__relationship=relationship
+    ).exists():
+        raise ValidationError("The related goal isn't part of this relationship's development plan.")
+    if assignment.related_competency_id and not DevelopmentPlanCompetency.objects.filter(
+        pk=assignment.related_competency_id, plan__relationship=relationship
+    ).exists():
+        raise ValidationError("The related competency isn't part of this relationship's development plan.")
+
+
+def _apply(assignment, fields):
+    for key, value in fields.items():
+        if key in ASSIGNMENT_FIELDS:
+            setattr(assignment, key, value.strip() if key == "title" and isinstance(value, str) else value)
+
+
+def create_assignment(relationship, actor, *, draft=False, year=None, month=None, **fields):
+    """Issued straight away, or saved as a draft the Supervisee can't see until it is issued."""
+    assignment = Assignment(organization=relationship.organization, issued_by=actor)
+    _apply(assignment, fields)
+    _check_assignment(relationship, assignment)
     if year and month:
         cycle = get_or_create_cycle(relationship, int(year), int(month))
     else:
-        cycle = cycle_for_date(relationship, due_on or timezone.localdate())
+        cycle = cycle_for_date(relationship, assignment.due_on or timezone.localdate())
+    assignment.cycle = cycle
+    assignment.assigned_on = assignment.assigned_on or (None if draft else timezone.localdate())
     with transaction.atomic():
-        assignment = Assignment.objects.create(
-            organization=relationship.organization,
-            cycle=cycle,
-            title=title.strip(),
-            instructions=instructions or "",
-            due_on=due_on,
-            issued_by=actor,
-            status=AssignmentStatus.ISSUED,
-        )
-        _record(assignment, actor, AssignmentStatus.ISSUED, instructions)
+        assignment.status = AssignmentStatus.DRAFT if draft else AssignmentStatus.ISSUED
+        assignment.save()
+        if not draft:
+            _record(assignment, actor, AssignmentStatus.ISSUED, assignment.instructions)
+    return assignment
+
+
+def issue_assignment(relationship, actor, *, title, instructions="", due_on=None, year=None, month=None, **fields):
+    return create_assignment(relationship, actor, title=title, instructions=instructions, due_on=due_on,
+                             year=year, month=month, **fields)
+
+
+def update_draft_assignment(assignment, *, year=None, month=None, **fields):
+    if assignment.status != AssignmentStatus.DRAFT:
+        raise ValidationError("Only a draft assignment can be edited.")
+    relationship = assignment.cycle.relationship
+    _apply(assignment, fields)
+    _check_assignment(relationship, assignment)
+    if year and month:
+        assignment.cycle = get_or_create_cycle(relationship, int(year), int(month))
+    assignment.save()
+    return assignment
+
+
+def issue_draft_assignment(assignment, actor):
+    _move(assignment, AssignmentStatus.ISSUED)
+    with transaction.atomic():
+        _record(assignment, actor, AssignmentStatus.ISSUED, assignment.instructions)
+        assignment.status = AssignmentStatus.ISSUED
+        assignment.assigned_on = assignment.assigned_on or timezone.localdate()
+        assignment.save(update_fields=["status", "assigned_on", "updated_at"])
     return assignment
 
 
@@ -152,6 +215,10 @@ def submit_assignment(assignment, actor, *, note="", files=()):
     files = list(files or [])
     if not files and not (note or "").strip():
         raise ValidationError("A submission needs at least one file or a note.")
+    if assignment.requires_written_response and not (note or "").strip():
+        raise ValidationError("This assignment requires a written response.")
+    if (assignment.requires_file or assignment.requires_evidence) and not files:
+        raise ValidationError("This assignment requires an attached file.")
     if len(files) > MAX_ATTACHMENTS_PER_SUBMISSION:
         raise ValidationError(f"Attach no more than {MAX_ATTACHMENTS_PER_SUBMISSION} files per submission.")
     names = [validate_upload(upload) for upload in files]
@@ -281,26 +348,82 @@ def return_fieldwork_hours(entry, actor, *, reason):
 # Model 2 — RBT / BCaBA ongoing: Supervisor-authored sessions + self-attested service hours
 # ---------------------------------------------------------------------------
 
-def document_session(relationship, actor, *, occurred_on, duration_minutes, session_type,
-                     client_observation=False, notes=""):
-    if not occurred_on:
+SESSION_FIELDS = (
+    "occurred_on", "duration_minutes", "session_type", "client_observation", "notes",
+    "start_time", "end_time", "meeting_method", "topics", "activities", "feedback", "follow_up",
+)
+
+
+def _minutes_between(start, end):
+    return (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+
+
+def _save_session_files(session, actor, files):
+    files = list(files or [])
+    if len(files) > MAX_ATTACHMENTS_PER_SUBMISSION:
+        raise ValidationError(f"Attach no more than {MAX_ATTACHMENTS_PER_SUBMISSION} files.")
+    names = [validate_upload(upload) for upload in files]
+    for upload, name in zip(files, names):
+        attachment = SessionAttachment(
+            id=uuid.uuid4(),
+            organization=session.organization,
+            session=session,
+            original_name=name,
+            content_type=getattr(upload, "content_type", "") or "",
+            size_bytes=upload.size,
+            uploaded_by=actor,
+        )
+        attachment.file.save(name, upload, save=False)
+        attachment.save()
+
+
+def _fill_session(session, fields):
+    for key, value in fields.items():
+        if key in SESSION_FIELDS and value is not None:
+            setattr(session, key, value)
+    if session.start_time and session.end_time:
+        session.duration_minutes = _minutes_between(session.start_time, session.end_time)
+    if not session.occurred_on:
         raise ValidationError("The session date is required.")
     try:
-        minutes = int(duration_minutes)
+        session.duration_minutes = int(session.duration_minutes)
     except (TypeError, ValueError):
-        raise ValidationError("Duration must be a whole number of minutes.") from None
-    session = SupervisionSession(
-        organization=relationship.organization,
-        cycle=cycle_for_date(relationship, occurred_on),
-        occurred_on=occurred_on,
-        duration_minutes=minutes,
-        session_type=session_type,
-        client_observation=bool(client_observation),
-        notes=notes or "",
-        documented_by=actor,
-    )
-    session.save()
+        raise ValidationError("Give the session's start and end times, or its duration in minutes.") from None
+
+
+def document_session(relationship, actor, *, draft=False, files=(), **fields):
+    """A completed record counts toward requirements; a draft doesn't until it is completed."""
+    session = SupervisionSession(organization=relationship.organization, documented_by=actor)
+    _fill_session(session, fields)
+    session.cycle = cycle_for_date(relationship, session.occurred_on)
+    session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
+    with transaction.atomic():
+        session.save()
+        _save_session_files(session, actor, files)
     return session
+
+
+def update_session(session, actor, *, complete=False, files=(), **fields):
+    """Edit a draft, optionally completing it. Completed records are never edited."""
+    if session.status != SessionStatus.DRAFT:
+        raise ValidationError("A completed session record can't be changed.")
+    _fill_session(session, fields)
+    if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
+        session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
+    if complete:
+        session.status = SessionStatus.COMPLETED
+    with transaction.atomic():
+        session.save()
+        _save_session_files(session, actor, files)
+    return session
+
+
+def add_note(relationship, actor, body):
+    if not (body or "").strip():
+        raise ValidationError("Write something before saving the note.")
+    return RelationshipNote.objects.create(
+        organization=relationship.organization, relationship=relationship, author=actor, body=body.strip()
+    )
 
 
 def attest_service_hours(relationship, actor, *, year, month, hours, notes=""):
@@ -356,6 +479,19 @@ def serialize_assignment(assignment, *, detail=False):
         "issued_by": _person(assignment.issued_by),
         "issued_at": assignment.created_at.isoformat(),
         "attachment_count": len(assignment.attachments.all()),
+        "description": assignment.description,
+        "assigned_on": assignment.assigned_on.isoformat() if assignment.assigned_on else None,
+        "related_goal": None if assignment.related_goal_id is None else {
+            "id": str(assignment.related_goal_id), "title": assignment.related_goal.title,
+        },
+        "related_competency": None if assignment.related_competency_id is None else {
+            "id": str(assignment.related_competency_id), "name": assignment.related_competency.name,
+        },
+        "requirements": {
+            "written_response": assignment.requires_written_response,
+            "file": assignment.requires_file,
+            "evidence": assignment.requires_evidence,
+        },
     }
     if detail:
         attachments_by_event = {}
@@ -399,12 +535,40 @@ def serialize_session(session):
     return {
         "id": str(session.id),
         "cycle_id": str(session.cycle_id),
+        "status": session.status,
         "occurred_on": session.occurred_on.isoformat(),
+        "start_time": session.start_time.strftime("%H:%M") if session.start_time else None,
+        "end_time": session.end_time.strftime("%H:%M") if session.end_time else None,
         "duration_minutes": session.duration_minutes,
         "session_type": session.session_type,
+        "meeting_method": session.meeting_method,
         "client_observation": session.client_observation,
+        "topics": session.topics,
+        "activities": session.activities,
+        "feedback": session.feedback,
+        "follow_up": session.follow_up,
         "notes": session.notes,
         "documented_by": _person(session.documented_by),
+        "documented_at": session.updated_at.isoformat(),
+        "attachments": [
+            {
+                "id": str(a.id),
+                "name": a.original_name,
+                "size_bytes": a.size_bytes,
+                "uploaded_at": a.created_at.isoformat(),
+                "download_url": f"/api/v1/session-attachments/{a.id}/download",
+            }
+            for a in session.attachments.all() if a.record_status == "active"
+        ],
+    }
+
+
+def serialize_note(note):
+    return {
+        "id": str(note.id),
+        "body": note.body,
+        "author": _person(note.author),
+        "created_at": note.created_at.isoformat(),
     }
 
 
@@ -423,7 +587,8 @@ def serialize_attestation(attestation):
 def serialize_cycle(cycle, *, compliance=None, detail=False):
     assignments = [a for a in cycle.assignments.all() if a.record_status == "active"]
     hours = [h for h in cycle.hours_entries.all() if h.record_status == "active"]
-    sessions = [s for s in cycle.sessions.all() if s.record_status == "active"]
+    # Only completed records count; drafts are the Supervisor's work in progress
+    sessions = [s for s in cycle.sessions.all() if s.record_status == "active" and s.status == SessionStatus.COMPLETED]
     attestation = next((a for a in cycle.service_attestations.all() if a.record_status == "active"), None)
     data = {
         "id": str(cycle.id),

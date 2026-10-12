@@ -1,6 +1,7 @@
 """Monthly Work & Hours API: cycles, assignments, fieldwork hours, sessions, service hours, compliance."""
 
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from django.http import FileResponse
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -12,6 +13,7 @@ from apps.audit.services import write_audit
 from apps.core.api_serializers import (
     JSON_RESPONSE,
     AssignmentCreateSerializer,
+    AssignmentPatchSerializer,
     AssignmentReviewSerializer,
     AssignmentSubmitSerializer,
     CycleCreateSerializer,
@@ -19,18 +21,25 @@ from apps.core.api_serializers import (
     HoursCreateSerializer,
     HoursPatchSerializer,
     HoursReturnSerializer,
+    NoteCreateSerializer,
     ServiceHoursSerializer,
     SessionCreateSerializer,
+    SessionPatchSerializer,
 )
 from apps.rbac.permissions import HasWorkspace
-from apps.rbac.services import has_permission
+from apps.rbac.models import OrgRole
+from apps.rbac.services import has_permission, org_roles_for
 from apps.supervision import monthly
 from apps.supervision.compliance import cycle_compliance, relationship_compliance
 from apps.supervision.models import (
     Assignment,
     AssignmentAttachment,
+    AssignmentStatus,
     HoursEntry,
     MonthlyCycle,
+    RelationshipNote,
+    SessionAttachment,
+    SessionStatus,
     SupervisionSession,
     SupervisoryRelationship,
 )
@@ -97,12 +106,26 @@ def _assignment(pk):
     return (
         Assignment.objects.select_related(
             "cycle", "cycle__relationship", "cycle__relationship__supervisor",
-            "cycle__relationship__supervisee", "issued_by",
+            "cycle__relationship__supervisee", "issued_by", "related_goal", "related_competency",
         )
         .prefetch_related("events__actor", "attachments__uploaded_by")
         .filter(pk=pk)
         .first()
     )
+
+
+def _visible_assignments(request, qs, relationships):
+    """Drafts are visible only to those who may issue assignments on that relationship."""
+    me = request.user_account
+    drafters = {rel_id for rel_id, rel in relationships.items() if has_permission(me, "assignment.create", relationship=rel)}
+    return qs.exclude(Q(status=AssignmentStatus.DRAFT) & ~Q(cycle__relationship_id__in=drafters))
+
+
+def _visible_sessions(request, qs, relationships):
+    """Drafts are visible only to the Supervisor documenting them."""
+    me = request.user_account
+    writers = {rel_id for rel_id, rel in relationships.items() if has_permission(me, "session.document", relationship=rel)}
+    return qs.exclude(Q(status=SessionStatus.DRAFT) & ~Q(cycle__relationship_id__in=writers))
 
 
 def _assignment_response(pk, code=status.HTTP_200_OK):
@@ -219,12 +242,12 @@ class AssignmentListView(APIView):
             return _not_found()
         if denied := _denied(request, "cycle.view", rel, "assignment", "list"):
             return denied
-        qs = (
+        qs = _visible_assignments(request, (
             Assignment.objects.filter(cycle__relationship=rel, record_status="active")
-            .select_related("cycle", "issued_by")
+            .select_related("cycle", "issued_by", "related_goal", "related_competency")
             .prefetch_related("attachments")
             .order_by("-cycle__year", "-cycle__month", "created_at")
-        )
+        ), {rel.id: rel})
         if request.query_params.get("year") and request.query_params.get("month"):
             qs = qs.filter(cycle__year=request.query_params["year"], cycle__month=request.query_params["month"])
         return Response({
@@ -234,7 +257,7 @@ class AssignmentListView(APIView):
             "assignments": [monthly.serialize_assignment(a) for a in qs],
         })
 
-    @extend_schema(tags=["Assignments"], summary="Issue an assignment", request=AssignmentCreateSerializer, operation_id="assignments_create", responses=JSON_RESPONSE)
+    @extend_schema(tags=["Assignments"], summary="Issue an assignment, or save it as a draft", request=AssignmentCreateSerializer, operation_id="assignments_create", responses=JSON_RESPONSE)
     def post(self, request, pk):
         rel = _relationship(pk)
         if rel is None:
@@ -245,10 +268,11 @@ class AssignmentListView(APIView):
         if not serializer.is_valid():
             return _invalid(serializer)
         try:
-            assignment = monthly.issue_assignment(rel, request.user_account, **serializer.validated_data)
+            assignment = monthly.create_assignment(rel, request.user_account, **serializer.validated_data)
         except ValidationError as exc:
             return _bad_request(exc)
-        write_audit(action="assignment.issue", entity_type="assignment", entity_id=assignment.id, request=request,
+        action = "assignment.draft" if assignment.status == AssignmentStatus.DRAFT else "assignment.issue"
+        write_audit(action=action, entity_type="assignment", entity_id=assignment.id, request=request,
                     after={"title": assignment.title, "cycle_id": str(assignment.cycle_id)})
         return _assignment_response(assignment.id, status.HTTP_201_CREATED)
 
@@ -264,10 +288,51 @@ class AssignmentDetailView(APIView):
         rel = assignment.cycle.relationship
         if denied := _denied(request, "cycle.view", rel, "assignment", assignment.id):
             return denied
+        can_issue = has_permission(request.user_account, "assignment.create", relationship=rel)
+        if assignment.status == AssignmentStatus.DRAFT and not can_issue:
+            return _not_found()
         data = monthly.serialize_assignment(assignment, detail=True)
+        data["relationship_id"] = str(rel.id)
+        data["can_issue"] = can_issue
         data["can_submit"] = has_permission(request.user_account, "assignment.submit", relationship=rel)
         data["can_review"] = has_permission(request.user_account, "assignment.review", relationship=rel)
         return Response(data)
+
+    @extend_schema(tags=["Assignments"], summary="Edit a draft assignment", request=AssignmentPatchSerializer, operation_id="assignments_update", responses=JSON_RESPONSE)
+    def patch(self, request, pk):
+        assignment = _assignment(pk)
+        if assignment is None:
+            return _not_found()
+        if denied := _denied(request, "assignment.create", assignment.cycle.relationship, "assignment", assignment.id):
+            return denied
+        serializer = AssignmentPatchSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        try:
+            monthly.update_draft_assignment(assignment, **serializer.validated_data)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="assignment.draft_update", entity_type="assignment", entity_id=assignment.id, request=request)
+        return _assignment_response(assignment.id)
+
+
+class AssignmentIssueView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Assignments"], summary="Issue a draft assignment to the Supervisee", request=None, operation_id="assignments_issue", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        assignment = _assignment(pk)
+        if assignment is None:
+            return _not_found()
+        if denied := _denied(request, "assignment.create", assignment.cycle.relationship, "assignment", assignment.id):
+            return denied
+        try:
+            monthly.issue_draft_assignment(assignment, request.user_account)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="assignment.issue", entity_type="assignment", entity_id=assignment.id, request=request,
+                    before={"status": "draft"}, after={"status": assignment.status})
+        return _assignment_response(assignment.id)
 
 
 class _AssignmentActionView(APIView):
@@ -480,6 +545,7 @@ class HoursReturnView(APIView):
 
 class SessionListView(APIView):
     permission_classes = [HasWorkspace]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(tags=["Sessions"], summary="Documented supervision sessions of a relationship", operation_id="sessions_list", responses=JSON_RESPONSE)
     def get(self, request, pk):
@@ -488,11 +554,12 @@ class SessionListView(APIView):
             return _not_found()
         if denied := _denied(request, "session.view", rel, "supervision_session", "list"):
             return denied
-        qs = (
+        qs = _visible_sessions(request, (
             SupervisionSession.objects.filter(cycle__relationship=rel, record_status="active")
             .select_related("documented_by")
+            .prefetch_related("attachments")
             .order_by("-occurred_on", "-created_at")
-        )
+        ), {rel.id: rel})
         if request.query_params.get("year") and request.query_params.get("month"):
             qs = qs.filter(cycle__year=request.query_params["year"], cycle__month=request.query_params["month"])
         return Response({
@@ -500,23 +567,145 @@ class SessionListView(APIView):
             "sessions": [monthly.serialize_session(s) for s in qs],
         })
 
-    @extend_schema(tags=["Sessions"], summary="Document a supervision session (Supervisor)", request=SessionCreateSerializer, operation_id="sessions_create", responses=JSON_RESPONSE)
+    @extend_schema(tags=["Sessions"], summary="Document a supervision session, or save a draft (Supervisor)", request={"multipart/form-data": SessionCreateSerializer, "application/json": SessionCreateSerializer}, operation_id="sessions_create", responses=JSON_RESPONSE)
     def post(self, request, pk):
         rel = _relationship(pk)
         if rel is None:
             return _not_found()
         if denied := _denied(request, "session.document", rel, "supervision_session", "new"):
             return denied
-        serializer = SessionCreateSerializer(data=request.data)
+        serializer = SessionCreateSerializer(data=_without_files(request))
         if not serializer.is_valid():
             return _invalid(serializer)
         try:
-            session = monthly.document_session(rel, request.user_account, **serializer.validated_data)
+            session = monthly.document_session(rel, request.user_account, files=request.FILES.getlist("files"),
+                                               **serializer.validated_data)
         except ValidationError as exc:
             return _bad_request(exc)
-        write_audit(action="session.document", entity_type="supervision_session", entity_id=session.id,
-                    request=request, after=monthly.serialize_session(session))
-        return Response(monthly.serialize_session(session), status=status.HTTP_201_CREATED)
+        action = "session.draft" if session.status == SessionStatus.DRAFT else "session.document"
+        write_audit(action=action, entity_type="supervision_session", entity_id=session.id,
+                    request=request, after={"status": session.status, "occurred_on": session.occurred_on.isoformat()})
+        return Response(monthly.serialize_session(_session(session.id)), status=status.HTTP_201_CREATED)
+
+
+def _without_files(request):
+    """Form fields only; uploads are read from request.FILES."""
+    if hasattr(request.data, "dict"):
+        return {key: value for key, value in request.data.dict().items() if key != "files"}
+    return {key: value for key, value in request.data.items() if key != "files"}
+
+
+def _session(pk):
+    return (
+        SupervisionSession.objects.select_related(
+            "cycle__relationship__supervisor", "cycle__relationship__supervisee", "documented_by"
+        )
+        .prefetch_related("attachments")
+        .filter(pk=pk)
+        .first()
+    )
+
+
+class SessionDetailView(APIView):
+    permission_classes = [HasWorkspace]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @extend_schema(tags=["Sessions"], summary="One supervision session record", operation_id="sessions_retrieve", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        session = _session(pk)
+        if session is None:
+            return _not_found()
+        rel = session.cycle.relationship
+        if denied := _denied(request, "session.view", rel, "supervision_session", session.id):
+            return denied
+        can_document = has_permission(request.user_account, "session.document", relationship=rel)
+        if session.status == SessionStatus.DRAFT and not can_document:
+            return _not_found()
+        return Response({**monthly.serialize_session(session), "relationship_id": str(rel.id), "can_document": can_document})
+
+    @extend_schema(tags=["Sessions"], summary="Edit a draft session; complete=true makes it a completed record", request={"multipart/form-data": SessionPatchSerializer, "application/json": SessionPatchSerializer}, operation_id="sessions_update", responses=JSON_RESPONSE)
+    def patch(self, request, pk):
+        session = _session(pk)
+        if session is None:
+            return _not_found()
+        if denied := _denied(request, "session.document", session.cycle.relationship, "supervision_session", session.id):
+            return denied
+        serializer = SessionPatchSerializer(data=_without_files(request), partial=True)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        data = dict(serializer.validated_data)
+        complete = data.pop("complete", False)
+        try:
+            monthly.update_session(session, request.user_account, complete=complete,
+                                   files=request.FILES.getlist("files"), **data)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="session.document" if complete else "session.draft_update", entity_type="supervision_session",
+                    entity_id=session.id, request=request, after={"status": session.status})
+        return Response(monthly.serialize_session(_session(session.id)))
+
+
+class SessionAttachmentDownloadView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Sessions"], summary="Download a file kept with a session", operation_id="session_attachment_download", responses={200: bytes, 403: dict, 404: dict})
+    def get(self, request, pk):
+        attachment = (
+            SessionAttachment.objects.select_related(
+                "session__cycle__relationship__supervisor", "session__cycle__relationship__supervisee"
+            ).filter(pk=pk).first()
+        )
+        if attachment is None:
+            return _not_found()
+        rel = attachment.session.cycle.relationship
+        if denied := _denied(request, "session.view", rel, "session_attachment", attachment.id):
+            return denied
+        if attachment.session.status == SessionStatus.DRAFT and not has_permission(request.user_account, "session.document", relationship=rel):
+            return _not_found()
+        try:
+            handle = attachment.file.open("rb")
+        except (FileNotFoundError, OSError):
+            return Response({"detail": "The file is no longer in storage.", "code": "file_missing"},
+                            status=status.HTTP_404_NOT_FOUND)
+        return FileResponse(handle, as_attachment=True, filename=attachment.original_name,
+                            content_type=attachment.content_type or "application/octet-stream")
+
+
+def _can_read_notes(user, rel):
+    return has_permission(user, "session.document", relationship=rel) or OrgRole.CLINICAL_DIRECTOR in org_roles_for(user)
+
+
+class RelationshipNotesView(APIView):
+    """Supervisor Notes: the Supervisor's running notes (Clinical Directors may read). Never compliance-bearing."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Supervision"], summary="Supervisor notes on a relationship", operation_id="relationship_notes_list", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if not _can_read_notes(request.user_account, rel):
+            return Response({"detail": "Not permitted.", "code": "notes_denied"}, status=status.HTTP_403_FORBIDDEN)
+        notes = RelationshipNote.objects.filter(relationship=rel, record_status="active").select_related("author")
+        return Response({
+            "can_write": has_permission(request.user_account, "session.document", relationship=rel),
+            "notes": [monthly.serialize_note(n) for n in notes],
+        })
+
+    @extend_schema(tags=["Supervision"], summary="Add a supervisor note", request=NoteCreateSerializer, operation_id="relationship_notes_create", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if denied := _denied(request, "session.document", rel, "relationship_note", "new"):
+            return denied
+        try:
+            note = monthly.add_note(rel, request.user_account, request.data.get("body"))
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="note.create", entity_type="relationship_note", entity_id=note.id, request=request)
+        return Response(monthly.serialize_note(note), status=status.HTTP_201_CREATED)
 
 
 class ServiceHoursView(APIView):
@@ -568,12 +757,12 @@ class AllAssignmentsView(APIView):
     def get(self, request):
         me = request.user_account
         rels = {rel.id: rel for rel in _relationships_with(request, "cycle.view")}
-        qs = (
+        qs = _visible_assignments(request, (
             Assignment.objects.filter(cycle__relationship_id__in=rels, record_status="active")
-            .select_related("cycle", "issued_by")
+            .select_related("cycle", "issued_by", "related_goal", "related_competency")
             .prefetch_related("attachments")
             .order_by("-cycle__year", "-cycle__month", "-created_at")
-        )
+        ), rels)
         rows = []
         for assignment in qs:
             rel = rels[assignment.cycle.relationship_id]
@@ -631,11 +820,12 @@ class AllSessionsView(APIView):
     def get(self, request):
         me = request.user_account
         rels = {rel.id: rel for rel in _relationships_with(request, "session.view")}
-        qs = (
+        qs = _visible_sessions(request, (
             SupervisionSession.objects.filter(cycle__relationship_id__in=rels, record_status="active")
             .select_related("cycle", "documented_by")
+            .prefetch_related("attachments")
             .order_by("-occurred_on", "-created_at")
-        )
+        ), rels)
         return Response({
             "documentable_relationships": [
                 _relationship_summary(rel) for rel in rels.values()

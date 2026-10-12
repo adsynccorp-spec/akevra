@@ -30,6 +30,7 @@ from apps.supervision.models import (
     HoursKind,
     HoursStatus,
     ServiceHoursAttestation,
+    SessionStatus,
     SessionType,
     SupervisionFormat,
     SupervisionSession,
@@ -429,7 +430,8 @@ def _fieldwork_month_for(cycle, rules):
 
 
 def _ongoing_month_for(cycle, rules):
-    active = cycle.sessions.filter(record_status="active")
+    # Only completed records count toward requirements; drafts never do
+    active = cycle.sessions.filter(record_status="active", status=SessionStatus.COMPLETED)
     sessions = active.aggregate(
         minutes=Sum("duration_minutes"),
         group_minutes=Sum("duration_minutes", filter=Q(session_type=SessionType.GROUP)),
@@ -449,7 +451,7 @@ def _ongoing_month_for(cycle, rules):
     quarter_observations = SupervisionSession.objects.filter(
         cycle__relationship_id=relationship_id, cycle__year=cycle.year,
         cycle__month__gte=quarter_start, cycle__month__lte=cycle.month,
-        client_observation=True, record_status="active",
+        client_observation=True, record_status="active", status=SessionStatus.COMPLETED,
     ).count()
     return evaluate_ongoing_month(
         rules,
@@ -508,7 +510,9 @@ def relationship_compliance(relationship, cycles):
             months_met += 1 if result.get("met") else 0
         # Totals from the raw rows, not the rounded monthly figures
         cycle_ids = [cycle.id for cycle in cycles]
-        minutes = SupervisionSession.objects.filter(cycle_id__in=cycle_ids, record_status="active").aggregate(
+        minutes = SupervisionSession.objects.filter(
+            cycle_id__in=cycle_ids, record_status="active", status=SessionStatus.COMPLETED
+        ).aggregate(
             total=Sum("duration_minutes")
         )["total"]
         service_total = _dec(

@@ -389,6 +389,108 @@ class MonthlyWorkAcceptanceTests(TestCase):
         self.assertEqual(outsider.get("/api/v1/assignments").data["assignments"], [])
         self.assertEqual(outsider.get("/api/v1/sessions").data["sessions"], [])
 
+    # ------------------------------------------------------------------
+    # Structured session records, drafts, attachments; assignment drafts and requirements; notes
+    # ------------------------------------------------------------------
+    def test_06_session_drafts_count_only_once_completed(self):
+        jordan = self.as_user("jordan@akevra.test")
+        alex = self.as_user("alex@akevra.test")
+        alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "40"}, format="json")
+
+        bad = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
+                          {"occurred_on": "2026-10-06", "start_time": "11:00", "end_time": "10:00", "session_type": "individual"},
+                          format="json")
+        self.assertEqual(bad.status_code, 400)
+
+        draft = jordan.post(
+            f"/api/v1/relationships/{self.rbt.id}/sessions",
+            {"occurred_on": "2026-10-06", "start_time": "10:00", "end_time": "11:30", "session_type": "individual",
+             "meeting_method": "remote", "topics": "BIP review", "activities": "Modeling", "feedback": "Good pacing",
+             "client_observation": "true", "draft": "true", "files": [self.pdf("notes.pdf")]},
+            format="multipart",
+        )
+        self.assertEqual(draft.status_code, 201, draft.data)
+        self.assertEqual((draft.data["status"], draft.data["duration_minutes"]), ("draft", 90))
+        self.assertEqual(draft.data["attachments"][0]["name"], "notes.pdf")
+
+        month = lambda: alex.get(f"/api/v1/relationships/{self.rbt.id}/compliance").data["months"][-1]
+        self.assertEqual(month()["supervision_hours"], 0.0)
+        self.assertEqual(alex.get(f"/api/v1/relationships/{self.rbt.id}/sessions").data["sessions"], [])
+        self.assertEqual(alex.get(f"/api/v1/sessions/{draft.data['id']}").status_code, 404)
+        self.assertEqual(alex.get(draft.data["attachments"][0]["download_url"]).status_code, 404)
+
+        done = jordan.patch(f"/api/v1/sessions/{draft.data['id']}", {"follow_up": "Send data sheet", "complete": True}, format="json")
+        self.assertEqual(done.status_code, 200, done.data)
+        self.assertEqual(done.data["status"], "completed")
+        self.assertEqual(month()["supervision_hours"], 1.5)
+        self.assertEqual(len(alex.get(f"/api/v1/relationships/{self.rbt.id}/sessions").data["sessions"]), 1)
+        self.assertEqual(jordan.patch(f"/api/v1/sessions/{draft.data['id']}", {"topics": "changed"}, format="json").status_code, 400)
+        self.assertEqual(alex.patch(f"/api/v1/sessions/{draft.data['id']}", {"complete": True}, format="json").status_code, 403)
+        download = alex.get(done.data["attachments"][0]["download_url"])
+        self.assertEqual(b"".join(download.streaming_content), b"%PDF-1.4 test")
+
+    def test_07_assignment_drafts_requirements_and_plan_links(self):
+        from apps.supervision.services import create_development_plan
+
+        jordan = self.as_user("jordan@akevra.test")
+        alex = self.as_user("alex@akevra.test")
+        plan = create_development_plan(
+            organization=self.rbt.organization, relationship=self.rbt,
+            goals=[{"title": "Independent data collection"}],
+            competencies=[{"name": "Session documentation"}],
+        )
+        other = create_development_plan(organization=self.fieldwork.organization, relationship=self.fieldwork,
+                                        goals=[{"title": "Someone else's goal"}])
+        goal, competency = plan.goals.first(), plan.competencies.first()
+
+        wrong = jordan.post(f"/api/v1/relationships/{self.rbt.id}/assignments",
+                            {"title": "x", "related_goal_id": str(other.goals.first().id)}, format="json")
+        self.assertEqual(wrong.status_code, 400)
+
+        draft = jordan.post(
+            f"/api/v1/relationships/{self.rbt.id}/assignments",
+            {"title": "Clinical observation reflection", "description": "Reflect on the session.", "year": 2026, "month": 10,
+             "assigned_on": "2026-10-01", "due_on": "2026-10-20", "related_goal_id": str(goal.id),
+             "related_competency_id": str(competency.id), "requires_written_response": True, "requires_file": True,
+             "draft": True},
+            format="json",
+        )
+        self.assertEqual(draft.status_code, 201, draft.data)
+        self.assertEqual(draft.data["status"], "draft")
+        self.assertEqual(draft.data["related_goal"]["title"], "Independent data collection")
+        self.assertEqual(alex.get(f"/api/v1/relationships/{self.rbt.id}/assignments").data["assignments"], [])
+        self.assertEqual(alex.get("/api/v1/assignments").data["assignments"], [])
+        self.assertEqual(alex.get(f"/api/v1/assignments/{draft.data['id']}").status_code, 404)
+        self.assertEqual(alex.post(f"/api/v1/assignments/{draft.data['id']}/submit", {"note": "x"}, format="multipart").status_code, 400)
+
+        edited = jordan.patch(f"/api/v1/assignments/{draft.data['id']}", {"due_on": "2026-10-25"}, format="json")
+        self.assertEqual(edited.data["due_on"], "2026-10-25")
+        issued = jordan.post(f"/api/v1/assignments/{draft.data['id']}/issue")
+        self.assertEqual(issued.status_code, 200, issued.data)
+        self.assertEqual([(e["from_status"], e["to_status"]) for e in issued.data["events"]], [("draft", "issued")])
+        self.assertEqual(jordan.patch(f"/api/v1/assignments/{draft.data['id']}", {"title": "y"}, format="json").status_code, 400)
+
+        no_file = alex.post(f"/api/v1/assignments/{draft.data['id']}/submit", {"note": "My reflection"}, format="multipart")
+        self.assertIn("file", no_file.data["detail"])
+        no_note = alex.post(f"/api/v1/assignments/{draft.data['id']}/submit", {"files": [self.pdf()]}, format="multipart")
+        self.assertIn("written response", no_note.data["detail"])
+        ok = alex.post(f"/api/v1/assignments/{draft.data['id']}/submit", {"note": "My reflection", "files": [self.pdf()]}, format="multipart")
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+    def test_08_supervisor_notes(self):
+        jordan = self.as_user("jordan@akevra.test")
+        alex = self.as_user("alex@akevra.test")
+        self.assertEqual(jordan.post(f"/api/v1/relationships/{self.rbt.id}/notes", {"body": " "}, format="json").status_code, 400)
+        created = jordan.post(f"/api/v1/relationships/{self.rbt.id}/notes", {"body": "Focus on generalization."}, format="json")
+        self.assertEqual(created.status_code, 201)
+        listed = jordan.get(f"/api/v1/relationships/{self.rbt.id}/notes").data
+        self.assertEqual([n["body"] for n in listed["notes"]], ["Focus on generalization."])
+        self.assertTrue(listed["can_write"])
+        self.assertEqual(alex.get(f"/api/v1/relationships/{self.rbt.id}/notes").status_code, 403)
+        self.assertEqual(alex.post(f"/api/v1/relationships/{self.rbt.id}/notes", {"body": "x"}, format="json").status_code, 403)
+        director = self.as_user("director@akevra.test")
+        self.assertEqual(len(director.get(f"/api/v1/relationships/{self.rbt.id}/notes").data["notes"]), 1)
+
 # ---------------------------------------------------------------------------
 # Calculation test-case set, built from the BACB handbooks (updated 06/2026). AKEVRA can
 # replace or extend the rows below with its own approved cases; the assertions stay the same.

@@ -145,10 +145,28 @@ class CyclePatchSerializer(serializers.Serializer):
 
 class AssignmentCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True)
     instructions = serializers.CharField(required=False, allow_blank=True)
+    assigned_on = serializers.DateField(required=False, allow_null=True)
     due_on = serializers.DateField(required=False, allow_null=True)
     year = serializers.IntegerField(required=False, min_value=2000, max_value=2100, help_text="Cycle year; defaults to the due date's month")
     month = serializers.IntegerField(required=False, min_value=1, max_value=12)
+    related_goal_id = serializers.UUIDField(required=False, allow_null=True, help_text="A goal from this relationship's development plan")
+    related_competency_id = serializers.UUIDField(required=False, allow_null=True)
+    requires_written_response = serializers.BooleanField(required=False, default=False)
+    requires_file = serializers.BooleanField(required=False, default=False)
+    requires_evidence = serializers.BooleanField(required=False, default=False)
+    draft = serializers.BooleanField(required=False, default=False, help_text="Save without issuing; the Supervisee can't see drafts")
+
+
+class AssignmentPatchSerializer(AssignmentCreateSerializer):
+    """Editing a draft; every field optional."""
+
+    title = serializers.CharField(max_length=255, required=False)
+    requires_written_response = serializers.BooleanField(required=False)
+    requires_file = serializers.BooleanField(required=False)
+    requires_evidence = serializers.BooleanField(required=False)
+    draft = None
 
 
 class AssignmentSubmitSerializer(serializers.Serializer):
@@ -184,10 +202,33 @@ class HoursReturnSerializer(serializers.Serializer):
 
 class SessionCreateSerializer(serializers.Serializer):
     occurred_on = serializers.DateField()
-    duration_minutes = serializers.IntegerField(min_value=1, max_value=1440)
+    start_time = serializers.TimeField(required=False, allow_null=True)
+    end_time = serializers.TimeField(required=False, allow_null=True)
+    duration_minutes = serializers.IntegerField(min_value=1, max_value=1440, required=False, help_text="Not needed when start and end times are given")
     session_type = serializers.ChoiceField(choices=["individual", "group"])
+    meeting_method = serializers.ChoiceField(choices=["in_person", "remote"], required=False, allow_blank=True)
     client_observation = serializers.BooleanField(required=False, default=False)
+    topics = serializers.CharField(required=False, allow_blank=True)
+    activities = serializers.CharField(required=False, allow_blank=True)
+    feedback = serializers.CharField(required=False, allow_blank=True)
+    follow_up = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+    files = serializers.ListField(child=serializers.FileField(), required=False, help_text="Up to 5 files, multipart/form-data")
+    draft = serializers.BooleanField(required=False, default=False, help_text="Save without completing; drafts never count")
+
+
+class SessionPatchSerializer(SessionCreateSerializer):
+    """Editing a draft; every field optional. `complete` turns it into a completed record."""
+
+    occurred_on = serializers.DateField(required=False)
+    session_type = serializers.ChoiceField(choices=["individual", "group"], required=False)
+    client_observation = serializers.BooleanField(required=False)
+    draft = None
+    complete = serializers.BooleanField(required=False, default=False)
+
+
+class NoteCreateSerializer(serializers.Serializer):
+    body = serializers.CharField()
 
 
 class ServiceHoursSerializer(serializers.Serializer):

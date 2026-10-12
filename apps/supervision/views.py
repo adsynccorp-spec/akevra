@@ -643,7 +643,7 @@ class DashboardSummaryView(APIView):
                 "assignments_reviewed": assignments.exclude(status="issued").count(),
                 "hours_logged": float(hours.aggregate(total=Sum("hours"))["total"] or 0),
                 "hours_verified": float(hours.filter(verified=True).aggregate(total=Sum("hours"))["total"] or 0),
-                "sessions_logged": SupervisionSession.objects.filter(**this_month).count(),
+                "sessions_logged": SupervisionSession.objects.filter(**this_month, status="completed").count(),
             },
         })
 

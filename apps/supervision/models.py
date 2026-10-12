@@ -482,6 +482,7 @@ class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
 
 
 class AssignmentStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
     ISSUED = "issued", "Issued"
     SUBMITTED = "submitted", "Submitted"
     REVISION_REQUESTED = "revision_requested", "Revision Requested"
@@ -502,6 +503,19 @@ class Assignment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
         null=True,
         blank=True,
     )
+    description = models.TextField(blank=True, default="")
+    assigned_on = models.DateField(null=True, blank=True)
+    # Plan items this task works toward (rows of the plan version current when it was set)
+    related_goal = models.ForeignKey(
+        DevelopmentPlanGoal, on_delete=models.PROTECT, related_name="assignments", null=True, blank=True
+    )
+    related_competency = models.ForeignKey(
+        DevelopmentPlanCompetency, on_delete=models.PROTECT, related_name="assignments", null=True, blank=True
+    )
+    # What a submission must include before it is accepted
+    requires_written_response = models.BooleanField(default=False)
+    requires_file = models.BooleanField(default=False)
+    requires_evidence = models.BooleanField(default=False)
 
     class Meta:
         db_table = "assignment"
@@ -624,8 +638,19 @@ class SessionType(models.TextChoices):
     GROUP = "group", "Group Supervision"
 
 
+class SessionStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    COMPLETED = "completed", "Completed"
+
+
+class MeetingMethod(models.TextChoices):
+    IN_PERSON = "in_person", "In-Person"
+    REMOTE = "remote", "Remote / Telehealth"
+
+
 class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """Compliance-bearing session documentation, authored by the Supervisor. Scheduling never grants credit."""
+    """Compliance-bearing session documentation, authored by the Supervisor. Scheduling never grants credit.
+    Only completed records count; a draft is the Supervisor's work in progress."""
 
     cycle = models.ForeignKey(
         MonthlyCycle, on_delete=models.PROTECT, related_name="sessions"
@@ -640,6 +665,14 @@ class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
         on_delete=models.PROTECT,
         related_name="documented_sessions",
     )
+    status = models.CharField(max_length=16, choices=SessionStatus.choices, default=SessionStatus.COMPLETED)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    meeting_method = models.CharField(max_length=16, choices=MeetingMethod.choices, blank=True, default="")
+    topics = models.TextField(blank=True, default="")
+    activities = models.TextField(blank=True, default="")
+    feedback = models.TextField(blank=True, default="")
+    follow_up = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "supervision_session"
@@ -650,6 +683,8 @@ class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
             raise ValidationError("Supervision sessions are documented by the relationship's Supervisor.")
         if not self.duration_minutes or self.duration_minutes > 24 * 60:
             raise ValidationError("Duration must be between 1 minute and 24 hours.")
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError("The end time must be after the start time.")
         _same_month(self.occurred_on, self.cycle, "The session date")
 
     def save(self, *args, **kwargs):
@@ -688,6 +723,37 @@ class ServiceHoursAttestation(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+def _session_attachment_path(instance, filename):
+    return f"sessions/{instance.organization_id}/{instance.session_id}/{instance.id}_{filename}"
+
+
+class SessionAttachment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A file kept with a supervision session record."""
+
+    session = models.ForeignKey(SupervisionSession, on_delete=models.PROTECT, related_name="attachments")
+    file = models.FileField(upload_to=_session_attachment_path, max_length=500)
+    original_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=128, blank=True, default="")
+    size_bytes = models.PositiveIntegerField()
+    uploaded_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="session_attachments")
+
+    class Meta:
+        db_table = "session_attachment"
+        ordering = ["created_at"]
+
+
+class RelationshipNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A Supervisor's running note on a relationship. Not part of any compliance figure."""
+
+    relationship = models.ForeignKey(SupervisoryRelationship, on_delete=models.PROTECT, related_name="notes")
+    author = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="relationship_notes")
+    body = models.TextField()
+
+    class Meta:
+        db_table = "relationship_note"
+        ordering = ["-created_at"]
 
 
 class Appointment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
