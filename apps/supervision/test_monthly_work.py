@@ -355,6 +355,40 @@ class MonthlyWorkAcceptanceTests(TestCase):
         self.assertEqual(month["rules"]["name"], "RBT Standard 2026 (test)")
 
 
+    # ------------------------------------------------------------------
+    # Lists across all of a user's relationships (Assignments / Hours / Sessions pages)
+    # ------------------------------------------------------------------
+    def test_05_cross_relationship_lists_are_scoped(self):
+        jordan = self.as_user("jordan@akevra.test")
+        casey = self.as_user("casey@akevra.test")
+        jordan.post(f"/api/v1/relationships/{self.rbt.id}/assignments", {"title": "RBT task", "due_on": "2026-10-20"}, format="json")
+        jordan.post(f"/api/v1/relationships/{self.fieldwork.id}/assignments", {"title": "Fieldwork task", "due_on": "2026-10-20"}, format="json")
+        jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
+                    {"occurred_on": "2026-10-05", "duration_minutes": 60, "session_type": "individual"}, format="json")
+        self.log_hours(casey, "2026-10-02", "5")
+
+        mine = jordan.get("/api/v1/assignments").data
+        self.assertEqual({a["title"] for a in mine["assignments"]}, {"RBT task", "Fieldwork task"})
+        self.assertTrue(all(a["can_review"] for a in mine["assignments"]))
+        self.assertEqual({r["id"] for r in mine["issuable_relationships"]}, {str(self.rbt.id), str(self.fieldwork.id)})
+
+        alex = self.as_user("alex@akevra.test")
+        theirs = alex.get("/api/v1/assignments").data
+        self.assertEqual([a["title"] for a in theirs["assignments"]], ["RBT task"])
+        self.assertFalse(theirs["assignments"][0]["can_review"])
+        self.assertEqual(theirs["issuable_relationships"], [])
+        self.assertEqual(alex.get("/api/v1/hours").data["entries"], [])
+        self.assertEqual(len(alex.get("/api/v1/sessions").data["sessions"]), 1)
+
+        hours = jordan.get("/api/v1/hours").data["entries"]
+        self.assertEqual([(h["hours"], h["relationship"]["supervisee"]["name"], h["can_verify"]) for h in hours],
+                         [(5.0, self.casey.full_name, True)])
+        self.assertEqual(casey.get("/api/v1/hours").data["loggable_relationships"][0]["id"], str(self.fieldwork.id))
+
+        outsider = self.as_user("summit.supervisor@akevra.test")
+        self.assertEqual(outsider.get("/api/v1/assignments").data["assignments"], [])
+        self.assertEqual(outsider.get("/api/v1/sessions").data["sessions"], [])
+
 # ---------------------------------------------------------------------------
 # Calculation test-case set, built from the BACB handbooks (updated 06/2026). AKEVRA can
 # replace or extend the rows below with its own approved cases; the assertions stay the same.

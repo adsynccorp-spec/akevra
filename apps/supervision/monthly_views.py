@@ -539,3 +539,110 @@ class ServiceHoursView(APIView):
         write_audit(action="service_hours.attest", entity_type="service_hours_attestation",
                     entity_id=attestation.id, request=request, after=monthly.serialize_attestation(attestation))
         return Response(monthly.serialize_attestation(attestation))
+
+
+# ---------------------------------------------------------------------------
+# Across all of the caller's relationships (the Assignments, Hours and Sessions pages)
+# ---------------------------------------------------------------------------
+
+def _relationships_with(request, permission):
+    from apps.supervision.views import visible_relationships
+
+    me = request.user_account
+    return [rel for rel in visible_relationships(me) if has_permission(me, permission, relationship=rel)]
+
+
+def _relationship_summary(rel):
+    return {
+        "id": str(rel.id),
+        "supervision_track": rel.supervision_track,
+        "supervisee": {"id": str(rel.supervisee_id), "name": rel.supervisee.full_name},
+        "supervisor": {"id": str(rel.supervisor_id), "name": rel.supervisor.full_name},
+    }
+
+
+class AllAssignmentsView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Assignments"], summary="Assignments across all of my relationships", operation_id="assignments_all", responses=JSON_RESPONSE)
+    def get(self, request):
+        me = request.user_account
+        rels = {rel.id: rel for rel in _relationships_with(request, "cycle.view")}
+        qs = (
+            Assignment.objects.filter(cycle__relationship_id__in=rels, record_status="active")
+            .select_related("cycle", "issued_by")
+            .prefetch_related("attachments")
+            .order_by("-cycle__year", "-cycle__month", "-created_at")
+        )
+        rows = []
+        for assignment in qs:
+            rel = rels[assignment.cycle.relationship_id]
+            rows.append({
+                **monthly.serialize_assignment(assignment),
+                "relationship": _relationship_summary(rel),
+                "can_submit": has_permission(me, "assignment.submit", relationship=rel),
+                "can_review": has_permission(me, "assignment.review", relationship=rel),
+            })
+        return Response({
+            "issuable_relationships": [
+                _relationship_summary(rel) for rel in rels.values()
+                if has_permission(me, "assignment.create", relationship=rel)
+            ],
+            "assignments": rows,
+        })
+
+
+class AllHoursView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Hours"], summary="Self-logged fieldwork hours across all of my relationships", operation_id="hours_all", responses=JSON_RESPONSE)
+    def get(self, request):
+        me = request.user_account
+        rels = {
+            rel.id: rel for rel in _relationships_with(request, "cycle.view")
+            if rel.supervision_track in monthly.SELF_LOGGED_HOURS_TRACKS
+        }
+        qs = (
+            _hours_queryset()
+            .filter(cycle__relationship_id__in=rels, record_status="active")
+            .order_by("-occurred_on", "-created_at")
+        )
+        return Response({
+            "loggable_relationships": [
+                _relationship_summary(rel) for rel in rels.values() if has_permission(me, "hours.log", relationship=rel)
+            ],
+            "entries": [
+                {
+                    **monthly.serialize_hours(entry),
+                    "cycle": {"year": entry.cycle.year, "month": entry.cycle.month},
+                    "relationship": _relationship_summary(rels[entry.cycle.relationship_id]),
+                    "can_verify": has_permission(me, "hours.verify", relationship=rels[entry.cycle.relationship_id]),
+                    "can_correct": has_permission(me, "hours.log", relationship=rels[entry.cycle.relationship_id]),
+                }
+                for entry in qs
+            ],
+        })
+
+
+class AllSessionsView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Sessions"], summary="Documented supervision sessions across all of my relationships", operation_id="sessions_all", responses=JSON_RESPONSE)
+    def get(self, request):
+        me = request.user_account
+        rels = {rel.id: rel for rel in _relationships_with(request, "session.view")}
+        qs = (
+            SupervisionSession.objects.filter(cycle__relationship_id__in=rels, record_status="active")
+            .select_related("cycle", "documented_by")
+            .order_by("-occurred_on", "-created_at")
+        )
+        return Response({
+            "documentable_relationships": [
+                _relationship_summary(rel) for rel in rels.values()
+                if has_permission(me, "session.document", relationship=rel)
+            ],
+            "sessions": [
+                {**monthly.serialize_session(s), "relationship": _relationship_summary(rels[s.cycle.relationship_id])}
+                for s in qs
+            ],
+        })
