@@ -491,6 +491,42 @@ class MonthlyWorkAcceptanceTests(TestCase):
         director = self.as_user("director@akevra.test")
         self.assertEqual(len(director.get(f"/api/v1/relationships/{self.rbt.id}/notes").data["notes"]), 1)
 
+    # ------------------------------------------------------------------
+    # Project decisions: fieldwork standard pinning, prior BCaBA hours, unrestricted activities
+    # ------------------------------------------------------------------
+    def test_09_rule_pinning_prior_hours_and_unrestricted(self):
+        jordan = self.as_user("jordan@akevra.test")
+        casey = self.as_user("casey@akevra.test")
+        self.log_hours(casey, "2026-10-01", "8", activity_category="restricted")
+        entry = self.log_hours(casey, "2026-10-02", "12")
+        self.assertEqual(entry["activity_category"], "unrestricted")
+        for e in casey.get(f"/api/v1/relationships/{self.fieldwork.id}/hours").data["entries"]:
+            jordan.post(f"/api/v1/hours/{e['id']}/verify")
+
+        def fieldwork():
+            data = casey.get(f"/api/v1/relationships/{self.fieldwork.id}/compliance").data
+            max_check = next(c for c in data["months"][-1]["checks"] if c["key"] == "max_monthly_hours")
+            return max_check["required"], data["cumulative"]
+
+        maximum, cumulative = fieldwork()
+        self.assertEqual(maximum, 130.0)
+        self.assertEqual((cumulative["unrestricted_percent"], cumulative["unrestricted_met"]), (60.0, True))
+        pinned = jordan.patch(f"/api/v1/relationships/{self.fieldwork.id}", {"fieldwork_requirements": "bacb_2027"}, format="json")
+        self.assertEqual(pinned.data["fieldwork_requirements"], "bacb_2027")
+        self.assertEqual(fieldwork()[0], 160.0)
+
+        # BCaBA: hours delivered before this record count toward the 1,000-hour step down to 2%
+        bcaba = SupervisoryRelationship.objects.create(
+            organization=self.jordan.organization, supervisor=self.jordan, supervisee=self.casey,
+            supervision_track=SupervisionTrack.BCABA_ONGOING, started_on=date(2026, 9, 1),
+        )
+        casey.put(f"/api/v1/relationships/{bcaba.id}/service-hours", {"year": 2026, "month": 10, "hours": "100"}, format="json")
+        required = lambda: casey.get(f"/api/v1/relationships/{bcaba.id}/compliance").data["months"][-1]["required_supervision_percent"]
+        self.assertEqual(required(), 5.0)
+        self.assertEqual(jordan.patch(f"/api/v1/relationships/{bcaba.id}", {"prior_service_hours": "-5"}, format="json").status_code, 400)
+        jordan.patch(f"/api/v1/relationships/{bcaba.id}", {"prior_service_hours": "1200"}, format="json")
+        self.assertEqual(required(), 2.0)
+
 # ---------------------------------------------------------------------------
 # Calculation test-case set, built from the BACB handbooks (updated 06/2026). AKEVRA can
 # replace or extend the rows below with its own approved cases; the assertions stay the same.
@@ -554,6 +590,14 @@ BCABA_CASES = [
 ]
 
 
+UNRESTRICTED_CASES = [
+    # id, eligible months, accrued hours, unrestricted hours, expected
+    ("U1 exactly 60% unrestricted", [("supervised", 2000)], 2000, 1200, {"unrestricted_met": True, "complete": True}),
+    ("U2 50% unrestricted blocks completion", [("supervised", 2000)], 2000, 1000, {"unrestricted_met": False, "complete": False, "unrestricted_percent": 50.0}),
+    ("U3 nothing logged yet", [], 0, 0, {"unrestricted_met": True, "unrestricted_percent": None}),
+]
+
+
 class CalculationCaseTests(SimpleTestCase):
     def assertSubset(self, expected, actual, case_id):
         for key, value in expected.items():
@@ -591,3 +635,10 @@ class CalculationCaseTests(SimpleTestCase):
             with self.subTest(case_id):
                 rules = default_rules(SupervisionTrack.BCABA_ONGOING, on)
                 self.assertSubset(expected, evaluate_ongoing_month(rules, **{**defaults, **inputs}), case_id)
+
+    def test_unrestricted_activity_cases(self):
+        rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK, D2026)
+        for case_id, months, accrued, unrestricted, expected in UNRESTRICTED_CASES:
+            with self.subTest(case_id):
+                result = evaluate_fieldwork_cumulative(rules, months, unrestricted_hours=unrestricted, accrued_hours=accrued)
+                self.assertSubset(expected, result, case_id)

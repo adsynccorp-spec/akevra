@@ -27,8 +27,10 @@ from django.db.models import Count, Q, Sum
 from apps.supervision.models import (
     ComplianceRuleSet,
     FieldworkSubtype,
+    HoursEntry,
     HoursKind,
     HoursStatus,
+    QUALIFYING_MEETING_METHODS,
     ServiceHoursAttestation,
     SessionStatus,
     SessionType,
@@ -54,6 +56,7 @@ _FIELDWORK_2022 = {
     "max_group_percent": "50",
     "min_monthly_hours": "20",
     "max_monthly_hours": "130",
+    "min_unrestricted_percent": "60",
 }
 _BCABA_CURRENT = {
     "min_supervision_percent": "5",
@@ -284,10 +287,11 @@ def _adjust_fieldwork_month(fieldwork_type, *, total, supervision, group, contac
     return total, adjustments
 
 
-def evaluate_fieldwork_cumulative(rules, months):
+def evaluate_fieldwork_cumulative(rules, months, *, unrestricted_hours=None, accrued_hours=None):
     """`months` is a list of (fieldwork_type, eligible_hours). With only one type, its own total
     applies (2,000 supervised or 1,500 concentrated). Mixed: concentrated hours x 1.33 plus
-    supervised hours must reach the supervised total."""
+    supervised hours must reach the supervised total. At least 60% of all fieldwork hours must be
+    unrestricted; that is checked over the whole record, not month by month."""
     supervised = sum((_dec(h) for t, h in months if t == FieldworkSubtype.SUPERVISED), ZERO)
     concentrated = sum((_dec(h) for t, h in months if t == FieldworkSubtype.CONCENTRATED), ZERO)
     need_supervised = rules.number("supervised.total_required_hours")
@@ -303,7 +307,17 @@ def evaluate_fieldwork_cumulative(rules, months):
         fraction = combined / need_supervised
         remaining_supervised = max(ZERO, need_supervised - combined)
         remaining_concentrated = remaining_supervised / multiplier
+    accrued = _dec(accrued_hours)
+    unrestricted = _dec(unrestricted_hours)
+    need_unrestricted = rules.number("min_unrestricted_percent") if rules.has("min_unrestricted_percent") else ZERO
+    unrestricted_percent = unrestricted / accrued * HUNDRED if accrued > 0 else None
+    unrestricted_met = unrestricted_percent is None or unrestricted_percent >= need_unrestricted
     return {
+        "unrestricted_hours": _out(unrestricted),
+        "restricted_hours": _out(max(ZERO, accrued - unrestricted)),
+        "unrestricted_percent": _out(unrestricted_percent),
+        "required_unrestricted_percent": _out(need_unrestricted),
+        "unrestricted_met": unrestricted_met,
         "supervised_hours": _out(supervised),
         "concentrated_hours": _out(concentrated),
         "combined_hours": _out(supervised + concentrated * multiplier),
@@ -313,7 +327,7 @@ def evaluate_fieldwork_cumulative(rules, months):
         "percent_complete": _out(min(HUNDRED, fraction * HUNDRED)),
         "remaining_if_supervised": _out(remaining_supervised),
         "remaining_if_concentrated": _out(remaining_concentrated),
-        "complete": fraction >= 1,
+        "complete": fraction >= 1 and unrestricted_met,
     }
 
 
@@ -430,8 +444,10 @@ def _fieldwork_month_for(cycle, rules):
 
 
 def _ongoing_month_for(cycle, rules):
-    # Only completed records count toward requirements; drafts never do
-    active = cycle.sessions.filter(record_status="active", status=SessionStatus.COMPLETED)
+    # Only completed, real-time (qualifying) records count; drafts, phone and asynchronous never do
+    active = cycle.sessions.filter(
+        record_status="active", status=SessionStatus.COMPLETED, meeting_method__in=QUALIFYING_MEETING_METHODS
+    )
     sessions = active.aggregate(
         minutes=Sum("duration_minutes"),
         group_minutes=Sum("duration_minutes", filter=Q(session_type=SessionType.GROUP)),
@@ -444,14 +460,15 @@ def _ongoing_month_for(cycle, rules):
     attestation = cycle.service_attestations.filter(record_status="active").first()
     relationship_id = cycle.relationship_id
     earlier = Q(cycle__year__lt=cycle.year) | Q(cycle__year=cycle.year, cycle__month__lt=cycle.month)
-    prior_service = ServiceHoursAttestation.objects.filter(
+    prior_service = _dec(ServiceHoursAttestation.objects.filter(
         earlier, cycle__relationship_id=relationship_id, record_status="active"
-    ).aggregate(total=Sum("hours"))["total"]
+    ).aggregate(total=Sum("hours"))["total"]) + _dec(getattr(cycle.relationship, "prior_service_hours", 0))
     quarter_start = (cycle.month - 1) // 3 * 3 + 1
     quarter_observations = SupervisionSession.objects.filter(
         cycle__relationship_id=relationship_id, cycle__year=cycle.year,
         cycle__month__gte=quarter_start, cycle__month__lte=cycle.month,
         client_observation=True, record_status="active", status=SessionStatus.COMPLETED,
+        meeting_method__in=QUALIFYING_MEETING_METHODS,
     ).count()
     return evaluate_ongoing_month(
         rules,
@@ -469,9 +486,21 @@ def _ongoing_month_for(cycle, rules):
     )
 
 
+def rules_date(relationship, cycle):
+    """The date whose rules apply to this month. Fieldwork can be pinned to one BACB standard."""
+    day = date(cycle.year, cycle.month, 1)
+    pinned = getattr(relationship, "fieldwork_requirements", "by_month")
+    if relationship.supervision_track == SupervisionTrack.SUPERVISED_FIELDWORK:
+        if pinned == "bacb_2022":
+            return min(day, date(2026, 12, 1))
+        if pinned == "bacb_2027":
+            return max(day, date(2027, 1, 1))
+    return day
+
+
 def cycle_compliance(cycle):
     track = cycle.relationship.supervision_track
-    rules = load_rules(track, date(cycle.year, cycle.month, 1))
+    rules = load_rules(track, rules_date(cycle.relationship, cycle))
     if rules is None:
         return _rules_pending(track)
     if track == SupervisionTrack.SUPERVISED_FIELDWORK:
@@ -493,14 +522,25 @@ def relationship_compliance(relationship, cycles):
         eligible = []
         last_rules = None
         for cycle in cycles:
-            rules = load_rules(track, date(cycle.year, cycle.month, 1))
+            rules = load_rules(track, rules_date(relationship, cycle))
             last_rules = rules
             result = _fieldwork_month_for(cycle, rules)
             eligible.append((result["fieldwork_type"], result.pop("_eligible")))
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month,
                            **result, "rules": rules.source})
         rules = last_rules or default_rules(track)
-        return {"track": track, "months": months, "cumulative": evaluate_fieldwork_cumulative(rules, eligible)}
+        verified = HoursEntry.objects.filter(
+            cycle__relationship=relationship, status=HoursStatus.VERIFIED, record_status="active"
+        ).aggregate(
+            total=Sum("hours"), unrestricted=Sum("hours", filter=Q(activity_category="unrestricted"))
+        )
+        return {
+            "track": track,
+            "months": months,
+            "cumulative": evaluate_fieldwork_cumulative(
+                rules, eligible, unrestricted_hours=verified["unrestricted"], accrued_hours=verified["total"]
+            ),
+        }
 
     if track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
         months_met = 0
@@ -511,7 +551,8 @@ def relationship_compliance(relationship, cycles):
         # Totals from the raw rows, not the rounded monthly figures
         cycle_ids = [cycle.id for cycle in cycles]
         minutes = SupervisionSession.objects.filter(
-            cycle_id__in=cycle_ids, record_status="active", status=SessionStatus.COMPLETED
+            cycle_id__in=cycle_ids, record_status="active", status=SessionStatus.COMPLETED,
+            meeting_method__in=QUALIFYING_MEETING_METHODS,
         ).aggregate(
             total=Sum("duration_minutes")
         )["total"]

@@ -37,6 +37,8 @@ class RelationshipCreateSerializer(serializers.Serializer):
 
 class RelationshipPatchSerializer(serializers.Serializer):
     supervision_track = serializers.CharField(required=False)
+    fieldwork_requirements = serializers.ChoiceField(choices=["by_month", "bacb_2022", "bacb_2027"], required=False, help_text="Supervised Fieldwork: which BACB standard months are measured against")
+    prior_service_hours = serializers.DecimalField(max_digits=8, decimal_places=2, required=False, min_value=0, help_text="BCaBA: post-certification service hours before this record began")
     fieldwork_subtype = serializers.CharField(required=False, allow_blank=True)
     supervisee_purpose = serializers.CharField(required=False, allow_blank=True)
     status = serializers.CharField(required=False)
@@ -182,6 +184,7 @@ class HoursCreateSerializer(serializers.Serializer):
     occurred_on = serializers.DateField()
     hours = serializers.DecimalField(max_digits=6, decimal_places=2)
     kind = serializers.ChoiceField(choices=["independent", "supervision"])
+    activity_category = serializers.ChoiceField(choices=["unrestricted", "restricted"], required=False, default="unrestricted", help_text="BACB: at least 60% of all fieldwork hours must be unrestricted")
     supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
     client_observation = serializers.BooleanField(required=False, default=False)
     notes = serializers.CharField(required=False, allow_blank=True)
@@ -191,6 +194,7 @@ class HoursPatchSerializer(serializers.Serializer):
     occurred_on = serializers.DateField(required=False)
     hours = serializers.DecimalField(max_digits=6, decimal_places=2, required=False)
     kind = serializers.ChoiceField(choices=["independent", "supervision"], required=False)
+    activity_category = serializers.ChoiceField(choices=["unrestricted", "restricted"], required=False)
     supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
     client_observation = serializers.BooleanField(required=False)
     notes = serializers.CharField(required=False, allow_blank=True)
@@ -206,8 +210,9 @@ class SessionCreateSerializer(serializers.Serializer):
     end_time = serializers.TimeField(required=False, allow_null=True)
     duration_minutes = serializers.IntegerField(min_value=1, max_value=1440, required=False, help_text="Not needed when start and end times are given")
     session_type = serializers.ChoiceField(choices=["individual", "group"])
-    meeting_method = serializers.ChoiceField(choices=["in_person", "remote"], required=False, allow_blank=True)
+    meeting_method = serializers.ChoiceField(choices=["in_person", "remote", "phone", "asynchronous"], required=False, allow_blank=True, help_text="Phone and asynchronous records never count toward requirements")
     client_observation = serializers.BooleanField(required=False, default=False)
+    appointment_id = serializers.UUIDField(required=False, allow_null=True, help_text="The appointment this record documents")
     topics = serializers.CharField(required=False, allow_blank=True)
     activities = serializers.CharField(required=False, allow_blank=True)
     feedback = serializers.CharField(required=False, allow_blank=True)
@@ -236,3 +241,35 @@ class ServiceHoursSerializer(serializers.Serializer):
     month = serializers.IntegerField(min_value=1, max_value=12)
     hours = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+class AppointmentCreateSerializer(serializers.Serializer):
+    starts_at = serializers.DateTimeField()
+    ends_at = serializers.DateTimeField()
+    session_type = serializers.ChoiceField(choices=["individual", "group"], required=False, default="individual")
+    meeting_method = serializers.ChoiceField(choices=["in_person", "remote", "phone", "asynchronous"], required=False, allow_blank=True)
+    location = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    agenda = serializers.CharField(required=False, allow_blank=True)
+    repeat_weeks = serializers.IntegerField(required=False, default=0, min_value=0, max_value=25, help_text="Batch: this many more weekly appointments after the first")
+
+
+class AppointmentPatchSerializer(serializers.Serializer):
+    starts_at = serializers.DateTimeField(required=False)
+    ends_at = serializers.DateTimeField(required=False)
+    session_type = serializers.ChoiceField(choices=["individual", "group"], required=False)
+    meeting_method = serializers.ChoiceField(choices=["in_person", "remote", "phone", "asynchronous"], required=False, allow_blank=True)
+    location = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    agenda = serializers.CharField(required=False, allow_blank=True)
+    reason = serializers.CharField(required=False, allow_blank=True, help_text="Why it was rescheduled")
+
+
+class AppointmentCancelSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+
+
+class PrepNoteSerializer(serializers.Serializer):
+    body = serializers.CharField()

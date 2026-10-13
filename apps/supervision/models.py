@@ -49,6 +49,15 @@ class FieldworkSubtype(models.TextChoices):
     CONCENTRATED = "concentrated", "Concentrated"
 
 
+class FieldworkRequirements(models.TextChoices):
+    """Which BACB fieldwork standard a trainee's months are measured against. BACB applies the 2027
+    standard by application date, so a trainee applying before 2027 can be pinned to 2022."""
+
+    BY_MONTH = "by_month", "By month (2022 rules before 2027, 2027 rules after)"
+    BACB_2022 = "bacb_2022", "BACB 2022 standard"
+    BACB_2027 = "bacb_2027", "BACB 2027 standard"
+
+
 class SuperviseeAssignmentPurpose(models.TextChoices):
     """DEC-058 reasons a BCBA may be assigned as Supervisee. Not a fifth role."""
 
@@ -154,6 +163,12 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
     started_on = models.DateField()
     ended_on = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
+    fieldwork_requirements = models.CharField(
+        max_length=16, choices=FieldworkRequirements.choices, default=FieldworkRequirements.BY_MONTH
+    )
+    # BCaBA ongoing supervision: post-certification service hours delivered before this record began,
+    # so the 5% -> 2% step after 1,000 hours is reached at the right time
+    prior_service_hours = models.DecimalField(max_digits=8, decimal_places=2, default=0)
 
     class Meta:
         db_table = "supervisory_relationship"
@@ -190,6 +205,11 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
             raise ValidationError("Supervised Fieldwork requires a subtype.")
         self._clean_dec_058()
         self._clean_pathway_eligibility()
+        self._clean_prior_hours()
+
+    def _clean_prior_hours(self):
+        if self.prior_service_hours is None or self.prior_service_hours < 0:
+            raise ValidationError("Prior service hours can't be negative.")
 
     def _clean_pathway_eligibility(self):
         allowed = eligible_tracks(self.supervisee.credential_type)
@@ -566,6 +586,13 @@ class SupervisionFormat(models.TextChoices):
     GROUP = "group", "Group"
 
 
+class ActivityCategory(models.TextChoices):
+    """BACB: at least 60% of all fieldwork hours must be unrestricted activities."""
+
+    UNRESTRICTED = "unrestricted", "Unrestricted"
+    RESTRICTED = "restricted", "Restricted"
+
+
 class HoursStatus(models.TextChoices):
     PENDING = "pending", "Pending Review"
     VERIFIED = "verified", "Verified"
@@ -583,6 +610,7 @@ class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
     attested_on = models.DateField()
     occurred_on = models.DateField()
     kind = models.CharField(max_length=32, choices=HoursKind.choices, default=HoursKind.INDEPENDENT)
+    activity_category = models.CharField(max_length=16, choices=ActivityCategory.choices, default=ActivityCategory.UNRESTRICTED)
     supervision_format = models.CharField(max_length=32, choices=SupervisionFormat.choices, blank=True, default="")
     client_observation = models.BooleanField(default=False)
     notes = models.TextField(blank=True, default="")
@@ -646,6 +674,13 @@ class SessionStatus(models.TextChoices):
 class MeetingMethod(models.TextChoices):
     IN_PERSON = "in_person", "In-Person"
     REMOTE = "remote", "Remote / Telehealth"
+    PHONE = "phone", "Phone Call"
+    ASYNC = "asynchronous", "Asynchronous Review"
+
+
+# Only real-time, face-to-face supervision qualifies (BACB: not by phone or email); blank = recorded
+# before the method was captured
+QUALIFYING_MEETING_METHODS = ("", MeetingMethod.IN_PERSON, MeetingMethod.REMOTE)
 
 
 class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
@@ -673,6 +708,11 @@ class SupervisionSession(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
     activities = models.TextField(blank=True, default="")
     feedback = models.TextField(blank=True, default="")
     follow_up = models.TextField(blank=True, default="")
+    # The appointment this record documents, if any. The link is informational: only this
+    # completed record counts, never the appointment.
+    appointment = models.ForeignKey(
+        "supervision.Appointment", on_delete=models.PROTECT, related_name="session_records", null=True, blank=True
+    )
 
     class Meta:
         db_table = "supervision_session"
@@ -756,8 +796,17 @@ class RelationshipNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, 
         ordering = ["-created_at"]
 
 
+class AppointmentStatus(models.TextChoices):
+    SCHEDULED = "scheduled", "Scheduled"
+    CONFIRMED = "confirmed", "Confirmed"
+    COMPLETED = "completed", "Completed"
+    CANCELLED = "cancelled", "Cancelled"
+    NO_SHOW = "no_show", "No-Show"
+
+
 class Appointment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """Non-compliance-bearing logistics. Structurally separate from session records."""
+    """Non-compliance-bearing logistics. Structurally separate from session records: no state of an
+    appointment (scheduled, confirmed, completed) ever adds a contact, an observation or an hour."""
 
     relationship = models.ForeignKey(
         SupervisoryRelationship,
@@ -766,13 +815,52 @@ class Appointment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organ
     )
     starts_at = models.DateTimeField()
     ends_at = models.DateTimeField()
-    status = models.CharField(max_length=32, default="scheduled")
+    status = models.CharField(max_length=32, choices=AppointmentStatus.choices, default=AppointmentStatus.SCHEDULED)
+    session_type = models.CharField(max_length=32, choices=SessionType.choices, default=SessionType.INDIVIDUAL)
+    meeting_method = models.CharField(max_length=16, choices=MeetingMethod.choices, blank=True, default="")
+    location = models.CharField(max_length=255, blank=True, default="", help_text="Room, address or meeting link")
+    agenda = models.TextField(blank=True, default="")
+    # Appointments created together by a batch share one series id
+    series_id = models.UUIDField(null=True, blank=True)
+    cancel_reason = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        "accounts.UserAccount", on_delete=models.PROTECT, related_name="created_appointments", null=True, blank=True
+    )
 
     class Meta:
         db_table = "appointment"
+        ordering = ["starts_at"]
+
+    def clean(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValidationError("The appointment must end after it starts.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class AppointmentEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Every scheduling change in order: scheduled, rescheduled (with the old and new time), confirmed,
+    cancelled, completed, no-show. Never edited."""
+
+    appointment = models.ForeignKey(Appointment, on_delete=models.PROTECT, related_name="events")
+    action = models.CharField(max_length=32)
+    actor = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="appointment_events")
+    previous_starts_at = models.DateTimeField(null=True, blank=True)
+    previous_ends_at = models.DateTimeField(null=True, blank=True)
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+    reason = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "appointment_event"
+        ordering = ["created_at"]
 
 
 class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """The Supervisee's preparation for an appointment. Never compliance-bearing."""
+
     appointment = models.ForeignKey(
         Appointment, on_delete=models.PROTECT, related_name="prep_notes"
     )
@@ -785,6 +873,9 @@ class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
 
     class Meta:
         db_table = "pre_supervision_note"
+        constraints = [
+            models.UniqueConstraint(fields=["appointment", "submitted_by"], name="one_prep_note_per_person_per_appointment"),
+        ]
 
 
 class CompetencyAssessment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):

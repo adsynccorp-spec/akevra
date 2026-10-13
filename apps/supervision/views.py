@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from django.core.exceptions import ValidationError
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -107,6 +109,8 @@ def serialize_relationship(rel, viewer=None):
         "is_compliance_bearing": rel.is_compliance_bearing,
         "started_on": rel.started_on.isoformat(),
         "status": rel.status,
+        "fieldwork_requirements": rel.fieldwork_requirements,
+        "prior_service_hours": float(rel.prior_service_hours),
     }
     if viewer is not None:
         data["your_role"] = relationship_role_for(viewer, rel)
@@ -121,6 +125,9 @@ def serialize_relationship(rel, viewer=None):
                 "idp.view",
                 "session.document",
                 "session.view",
+                "appointment.manage",
+                "appointment.confirm",
+                "prep.submit",
                 "cycle.view",
                 "cycle.manage",
                 "compliance.view",
@@ -270,6 +277,13 @@ class RelationshipDetailView(APIView):
         for field in ("supervision_track", "fieldwork_subtype", "supervisee_purpose", "status", "ended_on"):
             if field in request.data:
                 setattr(rel, field, request.data[field] or "")
+        if "fieldwork_requirements" in request.data:
+            rel.fieldwork_requirements = request.data["fieldwork_requirements"] or "by_month"
+        if "prior_service_hours" in request.data:
+            try:
+                rel.prior_service_hours = Decimal(str(request.data["prior_service_hours"] or 0))
+            except (InvalidOperation, ValueError):
+                return Response({"detail": "Prior service hours must be a number."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             rel.save()
         except ValidationError as exc:
@@ -615,7 +629,7 @@ class DashboardSummaryView(APIView):
 
         now = timezone.now()
         appointments = (
-            Appointment.objects.filter(relationship__in=with_sessions, starts_at__gte=now, status="scheduled")
+            Appointment.objects.filter(relationship__in=with_sessions, starts_at__gte=now, status__in=["scheduled", "confirmed"], record_status="active")
             .select_related("relationship__supervisor", "relationship__supervisee")
             .order_by("starts_at")[:5]
         )

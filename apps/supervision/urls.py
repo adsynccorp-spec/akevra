@@ -1,6 +1,7 @@
 from django.urls import path
 
 from apps.supervision import monthly_views as mv
+from apps.supervision import scheduling_views as sv
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -50,6 +51,15 @@ urlpatterns = [
     path("sessions/<uuid:pk>", mv.SessionDetailView.as_view(), name="session-detail"),
     path("session-attachments/<uuid:pk>/download", mv.SessionAttachmentDownloadView.as_view(), name="session-attachment-download"),
     path("relationships/<uuid:pk>/notes", mv.RelationshipNotesView.as_view(), name="relationship-notes"),
+    # Scheduling (logistics only; never compliance-bearing)
+    path("appointments", sv.AllAppointmentsView.as_view(), name="appointments-all"),
+    path("relationships/<uuid:pk>/appointments", sv.AppointmentListView.as_view(), name="relationship-appointments"),
+    path("appointments/<uuid:pk>", sv.AppointmentDetailView.as_view(), name="appointment-detail"),
+    path("appointments/<uuid:pk>/confirm", sv.AppointmentConfirmView.as_view(), name="appointment-confirm"),
+    path("appointments/<uuid:pk>/cancel", sv.AppointmentCancelView.as_view(), name="appointment-cancel"),
+    path("appointments/<uuid:pk>/complete", sv.AppointmentCompleteView.as_view(), name="appointment-complete"),
+    path("appointments/<uuid:pk>/no-show", sv.AppointmentNoShowView.as_view(), name="appointment-no-show"),
+    path("appointments/<uuid:pk>/prep-note", sv.PrepNoteView.as_view(), name="appointment-prep-note"),
     path("hours/<uuid:pk>", mv.HoursDetailView.as_view(), name="hours-detail"),
     path("hours/<uuid:pk>/verify", mv.HoursVerifyView.as_view(), name="hours-verify"),
     path("hours/<uuid:pk>/return", mv.HoursReturnView.as_view(), name="hours-return"),

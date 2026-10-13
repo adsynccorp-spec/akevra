@@ -1,6 +1,8 @@
 from django.contrib import admin
 
 from apps.supervision.models import (
+    ComplianceRuleParameter,
+    ComplianceRuleSet,
     DevelopmentPlan,
     DevelopmentPlanCompetency,
     DevelopmentPlanGoal,
@@ -45,3 +47,18 @@ class DevelopmentPlanCompetencyAdmin(admin.ModelAdmin):
 @admin.register(DevelopmentPlanMilestone)
 class DevelopmentPlanMilestoneAdmin(admin.ModelAdmin):
     list_display = ("title", "plan", "status", "organization")
+
+
+class ComplianceRuleParameterInline(admin.TabularInline):
+    model = ComplianceRuleParameter
+    extra = 0
+    fields = ("key", "value", "unit", "record_status")
+
+
+@admin.register(ComplianceRuleSet)
+class ComplianceRuleSetAdmin(admin.ModelAdmin):
+    """Approved compliance parameters; editing a value here changes calculations without a deploy."""
+
+    list_display = ("name", "supervision_track", "effective_from", "effective_to", "record_status")
+    list_filter = ("supervision_track",)
+    inlines = [ComplianceRuleParameterInline]

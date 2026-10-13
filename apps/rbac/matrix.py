@@ -44,6 +44,9 @@ PERMISSIONS = [
     "service_hours.attest",
     "session.document",
     "session.view",
+    "appointment.manage",
+    "appointment.confirm",
+    "prep.submit",
     "assessment.manage",
     "assessment.view",
     "compliance.view",
@@ -73,6 +76,9 @@ MATRIX = {
         "service_hours.attest": False,
         "session.document": False,
         "session.view": False,
+        "appointment.manage": False,
+        "appointment.confirm": False,
+        "prep.submit": False,
         "assessment.manage": False,
         "assessment.view": False,
         "compliance.view": False,
@@ -100,6 +106,9 @@ MATRIX = {
         "service_hours.attest": False,
         "session.document": False,
         "session.view": True,
+        "appointment.manage": False,
+        "appointment.confirm": False,
+        "prep.submit": False,
         "assessment.manage": False,
         "assessment.view": True,
         "compliance.view": True,
@@ -127,6 +136,9 @@ MATRIX = {
         "service_hours.attest": False,
         "session.document": True,
         "session.view": True,
+        "appointment.manage": True,
+        "appointment.confirm": True,
+        "prep.submit": False,
         "assessment.manage": True,
         "assessment.view": True,
         "compliance.view": True,
@@ -154,6 +166,9 @@ MATRIX = {
         "service_hours.attest": True,
         "session.document": False,
         "session.view": True,
+        "appointment.manage": False,
+        "appointment.confirm": True,
+        "prep.submit": True,
         "assessment.manage": False,
         "assessment.view": True,
         "compliance.view": True,
@@ -188,6 +203,10 @@ def matrix_as_dict():
                 "leadership development, or case discussion. No fifth role. Not itself compliance-bearing."
             ),
             "rbac_003": "Administrator self-party exception is limited to relationship edit/view.",
+            "scheduling": (
+                "Appointments (appointment.manage/confirm) and preparation notes (prep.submit) are "
+                "logistics only: no appointment state changes any compliance figure."
+            ),
             "hours_models": (
                 "hours.log/hours.verify cover self-logged Supervised Fieldwork hours. "
                 "service_hours.attest covers the RBT/BCaBA monthly service hours; their "

@@ -19,6 +19,7 @@ from apps.supervision.models import (
     FieldworkSubtype,
     HoursEntry,
     HoursStatus,
+    QUALIFYING_MEETING_METHODS,
     SELF_LOGGED_HOURS_TRACKS,
     SESSION_DERIVED_HOURS_TRACKS,
     MonthlyCycle,
@@ -268,7 +269,7 @@ def complete_assignment(assignment, actor, *, comment=""):
 # Model 1 — Supervised Fieldwork: self-logged by the trainee, verified by the Supervisor
 # ---------------------------------------------------------------------------
 
-HOURS_FIELDS = ("occurred_on", "hours", "kind", "supervision_format", "client_observation", "notes")
+HOURS_FIELDS = ("occurred_on", "hours", "kind", "activity_category", "supervision_format", "client_observation", "notes")
 
 
 def _require_track(relationship, tracks, message):
@@ -278,7 +279,7 @@ def _require_track(relationship, tracks, message):
 
 
 def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, supervision_format="",
-                        client_observation=False, notes=""):
+                        client_observation=False, notes="", activity_category="unrestricted"):
     _require_track(
         relationship,
         SELF_LOGGED_HOURS_TRACKS,
@@ -294,6 +295,7 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
         attested_on=timezone.localdate(),
         hours=parse_decimal(hours, "Hours"),
         kind=kind,
+        activity_category=activity_category or "unrestricted",
         supervision_format=supervision_format or "",
         client_observation=bool(client_observation),
         notes=notes or "",
@@ -391,22 +393,39 @@ def _fill_session(session, fields):
         raise ValidationError("Give the session's start and end times, or its duration in minutes.") from None
 
 
-def document_session(relationship, actor, *, draft=False, files=(), **fields):
+def _appointment(appointment_id):
+    from apps.supervision.models import Appointment
+
+    appointment = Appointment.objects.filter(pk=appointment_id).first()
+    if appointment is None:
+        raise ValidationError("That appointment doesn't exist.")
+    return appointment
+
+
+def document_session(relationship, actor, *, draft=False, files=(), appointment_id=None, **fields):
     """A completed record counts toward requirements; a draft doesn't until it is completed."""
+    from apps.supervision.scheduling import link_session
+
     session = SupervisionSession(organization=relationship.organization, documented_by=actor)
     _fill_session(session, fields)
     session.cycle = cycle_for_date(relationship, session.occurred_on)
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
     with transaction.atomic():
+        if appointment_id:
+            link_session(session, _appointment(appointment_id))
         session.save()
         _save_session_files(session, actor, files)
     return session
 
 
-def update_session(session, actor, *, complete=False, files=(), **fields):
+def update_session(session, actor, *, complete=False, files=(), appointment_id=None, **fields):
     """Edit a draft, optionally completing it. Completed records are never edited."""
+    from apps.supervision.scheduling import link_session
+
     if session.status != SessionStatus.DRAFT:
         raise ValidationError("A completed session record can't be changed.")
+    if appointment_id:
+        link_session(session, _appointment(appointment_id))
     _fill_session(session, fields)
     if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
@@ -520,6 +539,7 @@ def serialize_hours(entry):
         "attested_on": entry.attested_on.isoformat(),
         "hours": float(entry.hours),
         "kind": entry.kind,
+        "activity_category": entry.activity_category,
         "supervision_format": entry.supervision_format,
         "client_observation": entry.client_observation,
         "notes": entry.notes,
@@ -536,6 +556,9 @@ def serialize_session(session):
         "id": str(session.id),
         "cycle_id": str(session.cycle_id),
         "status": session.status,
+        "appointment_id": str(session.appointment_id) if session.appointment_id else None,
+        # Completed and real-time (in person or live video): the only records that count
+        "qualifies": session.status == SessionStatus.COMPLETED and session.meeting_method in QUALIFYING_MEETING_METHODS,
         "occurred_on": session.occurred_on.isoformat(),
         "start_time": session.start_time.strftime("%H:%M") if session.start_time else None,
         "end_time": session.end_time.strftime("%H:%M") if session.end_time else None,
