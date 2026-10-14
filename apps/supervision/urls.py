@@ -2,6 +2,7 @@ from django.urls import path
 
 from apps.supervision import monthly_views as mv
 from apps.supervision import scheduling_views as sv
+from apps.supervision import assessment_views as av
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -60,6 +61,12 @@ urlpatterns = [
     path("appointments/<uuid:pk>/complete", sv.AppointmentCompleteView.as_view(), name="appointment-complete"),
     path("appointments/<uuid:pk>/no-show", sv.AppointmentNoShowView.as_view(), name="appointment-no-show"),
     path("appointments/<uuid:pk>/prep-note", sv.PrepNoteView.as_view(), name="appointment-prep-note"),
+    # Competency assessments
+    path("relationships/<uuid:pk>/assessments", av.AssessmentListView.as_view(), name="relationship-assessments"),
+    path("assessments/<uuid:pk>", av.AssessmentDetailView.as_view(), name="assessment-detail"),
+    path("assessments/<uuid:pk>/submit", av.AssessmentSubmitView.as_view(), name="assessment-submit"),
+    path("assessments/<uuid:pk>/return", av.AssessmentReturnView.as_view(), name="assessment-return"),
+    path("assessments/<uuid:pk>/finalize", av.AssessmentFinalizeView.as_view(), name="assessment-finalize"),
     path("hours/<uuid:pk>", mv.HoursDetailView.as_view(), name="hours-detail"),
     path("hours/<uuid:pk>/verify", mv.HoursVerifyView.as_view(), name="hours-verify"),
     path("hours/<uuid:pk>/return", mv.HoursReturnView.as_view(), name="hours-return"),

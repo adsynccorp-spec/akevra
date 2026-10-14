@@ -273,3 +273,11 @@ class AppointmentCancelSerializer(serializers.Serializer):
 
 class PrepNoteSerializer(serializers.Serializer):
     body = serializers.CharField()
+
+
+class AssessmentWriteSerializer(serializers.Serializer):
+    plan_competency_id = serializers.UUIDField(required=False, help_text="A competency from this relationship's development plan")
+    related_goal_id = serializers.UUIDField(required=False, allow_null=True)
+    assessed_on = serializers.DateField(required=False)
+    rating = serializers.ChoiceField(choices=[c for c in CompetencyLevel.values if c != "not_yet_assessed"], required=False, allow_blank=True)
+    documented_content = serializers.CharField(required=False, allow_blank=True, help_text="Evidence and observations behind the rating")

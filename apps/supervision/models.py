@@ -878,20 +878,43 @@ class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
         ]
 
 
+class AssessmentStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    READY_FOR_REVIEW = "ready_for_review", "Ready for Review"
+    OFFICIAL = "official", "Official"
+
+
 class CompetencyAssessment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A Supervisor's rating of one development-plan competency: Draft -> Ready for Review -> Official.
+    An official assessment is final and never edited; a later assessment supersedes it."""
+
     relationship = models.ForeignKey(
         SupervisoryRelationship,
         on_delete=models.PROTECT,
         related_name="assessments",
     )
     assessed_on = models.DateField()
-    rating_scale = models.CharField(max_length=64)
-    rating = models.CharField(max_length=64)
-    documented_content = models.TextField()
+    rating_scale = models.CharField(max_length=64, default="akevra_competency_levels")
+    rating = models.CharField(max_length=64, choices=CompetencyLevel.choices, blank=True, default="")
+    documented_content = models.TextField(blank=True, default="")
     approved = models.BooleanField(default=False)
+    # The plan competency (and goal) assessed; the name is kept so later plan versions never change it
+    plan_competency = models.ForeignKey(
+        DevelopmentPlanCompetency, on_delete=models.PROTECT, related_name="assessments", null=True, blank=True
+    )
+    competency_name = models.CharField(max_length=255, blank=True, default="")
+    related_goal = models.ForeignKey(
+        DevelopmentPlanGoal, on_delete=models.PROTECT, related_name="assessments", null=True, blank=True
+    )
+    status = models.CharField(max_length=32, choices=AssessmentStatus.choices, default=AssessmentStatus.DRAFT)
+    assessed_by = models.ForeignKey(
+        "accounts.UserAccount", on_delete=models.PROTECT, related_name="competency_assessments", null=True, blank=True
+    )
+    finalized_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "competency_assessment"
+        ordering = ["-assessed_on", "-created_at"]
 
 
 class ComplianceRuleSet(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel):
