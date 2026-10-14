@@ -6,6 +6,10 @@ This repository covers:
 
 - **Sprint 0** — API, PostgreSQL, organizations, sign-in, RBAC, audit
 - **Supervision Setup & Development Plans** — relationships, supervisee intake, versioned IDPs, goals, competencies, milestones
+- **Monthly Work & Hours** — monthly cycles, assignments, hours, supervision sessions, BACB compliance calculations
+- **Scheduling & Supervision Sessions** — appointments, confirmations, prep notes, documenting a held appointment
+- **Competency Assessments** — ratings against plan competencies, review, official (locked) record
+- **Frontend** (`akevra-frontend/`) — React app for every Relationship Detail tab plus the global Assignments, Hours and Sessions pages
 
 ---
 
@@ -24,6 +28,37 @@ This repository covers:
 - **One person, two roles** — the same person can be Supervisor in one relationship and Supervisee in another
 - **Workspace at login** — if the same email belongs to more than one organization, the user must pick one first
 - **Nothing is permanently deleted** — create and update are logged; delete is blocked
+
+### Monthly Work & Hours
+
+- **Monthly cycles** — one cycle per relationship per month, holding that month's assignments, hours and sessions. The Supervisor opens it and, for fieldwork, sets the month to supervised or concentrated (`cycle.manage`)
+- **Assignments** — Supervisor issues (or saves as a **draft**, hidden from the Supervisee until issued); Supervisee submits with files; Supervisor requests revision or completes. Every step is kept in the assignment history. "Requires a file" is enforced on submit
+- **Two hours models**
+  - **Supervised fieldwork** — the trainee logs their own hours (independent / supervision, restricted / unrestricted). The Supervisor verifies or returns each entry. Single or bulk verify
+  - **RBT / BCaBA** — supervision hours come from documented sessions. The Supervisee attests monthly service hours (`service_hours.attest`); they cannot self-log hours
+- **Supervision sessions** — date, start/end time, individual / group, meeting method, client observation, topics, feedback, follow-up, files. Can be saved as a draft and completed later. Phone and asynchronous sessions are recorded but do **not** count toward compliance
+- **Supervisor notes** — private notes on the Overview tab; Supervisees cannot read them
+- **Compliance** — pure calculation functions in `apps/supervision/compliance.py`:
+  - RBT: 5% of service hours, 2 contacts a month, 1 individual contact, 1 client observation
+  - BCaBA: 5% (2% after 1,000 service hours), biweekly contact, quarterly observation, group ≤ 50%
+  - Fieldwork: 20–130 hours a month; supervised 5% / 4 contacts, concentrated 10% / 6 contacts; 1 observation; group ≤ 50%; concentrated hours count ×1.33 toward the total; 60% unrestricted (cumulative); BACB adjustment table
+  - Rules are versioned by date (2022 rules, and the 2027 BACB changes from 2027-01-01). A fieldwork relationship stays on the rules in force when it started
+  - Results show **"pending AKEVRA approval"** until the rules are approved (see [docs/COMPLIANCE_RULES_FOR_APPROVAL.md](docs/COMPLIANCE_RULES_FOR_APPROVAL.md))
+
+### Scheduling & Supervision Sessions
+
+- **Appointments are logistics only** — scheduling, confirming, rescheduling or cancelling never changes a compliance figure. Only a documented session counts
+- Supervisor schedules one appointment or a weekly series (`repeat_weeks`); Supervisee confirms (`appointment.confirm`)
+- Reschedule (with reason), cancel (with reason), mark held, mark no-show. Every change is kept in the appointment history
+- **Prep notes** — the Supervisee writes a pre-supervision note on an upcoming appointment (`prep.submit`); the Supervisor reads it. Not compliance-bearing
+- **Document Session** — a held appointment opens the Log Session screen pre-filled; saving links the session to the appointment
+
+### Competency Assessments
+
+- Supervisor rates a competency from the current development plan (`assessment.manage`)
+- Flow: **Draft → Ready for Review → Official**. Review needs a rating; Official needs documented evidence. It can be returned from review to draft
+- An Official assessment is locked — it can no longer be edited
+- Supervisee sees Official assessments only (`assessment.view`); drafts and assessments under review are hidden
 
 Browse every endpoint in **Swagger**: http://127.0.0.1:8000/api/docs/
 
@@ -53,10 +88,12 @@ Then open:
 - Health check — http://127.0.0.1:8000/api/v1/health
 
 ```bash
-python manage.py test apps.core.tests apps.supervision.tests
+python manage.py test apps
 ```
 
-`migrate` is required on a fresh clone (it applies `supervision.0002` and `core.0003`). On a database that was already seeded for Sprint 0, `seed_sprint0` is safe to run again: it adds `casey@akevra.test` if missing and backfills DEC-058 purpose on BCBA-as-supervisee rows.
+The suite covers Sprint 0, Supervision Setup, Monthly Work & Hours (`test_monthly_work.py`, including BACB calculation cases), Scheduling (`test_scheduling.py`) and Competency Assessments (`test_assessments.py`).
+
+`migrate` is required on a fresh clone and after every pull. It applies the supervision migrations and the `core` migrations that install the database row-level security rules for the new tables. On a database that was already seeded for Sprint 0, `seed_sprint0` is safe to run again: it adds `casey@akevra.test` if missing and backfills DEC-058 purpose on BCBA-as-supervisee rows.
 
 ---
 
@@ -80,6 +117,12 @@ Demo password for every account: **`Sprint0!Akevra`**
 | `settings.admin@akevra.test` | Administrator **not** on any relationship |
 | `party.admin@akevra.test` | Administrator who **is** named on one relationship |
 | `mfa@akevra.test` | MFA — TOTP secret `JBSWY3DPEHPK3PXP` |
+| `qa.bcba@akevra.test` | **QA Sandbox** Supervisor (Blake) — create and edit freely here |
+| `qa.rbt@akevra.test` | QA Sandbox Supervisee (Sky) — RBT ongoing supervision |
+| `qa.rbt2@akevra.test` | QA Sandbox trainee (Jamie) — logs fieldwork hours |
+| `qa.admin@akevra.test` | QA Sandbox Administrator |
+
+The QA Sandbox is a separate organization, so testing there never touches the Northshore / Summit reference data.
 
 ---
 
@@ -96,6 +139,54 @@ Demo password for every account: **`Sprint0!Akevra`**
 | GET | `/api/v1/development-plans/{id}` | `idp.view` | retrieve one version **in full** (goals, competencies, milestones) |
 | PATCH | `/api/v1/development-plans/{id}` | `idp.manage` | edit **current** version → creates a new version; prior version is preserved |
 | POST | `/api/v1/milestones/{id}/transition` | `idp.manage` | Active → Achieved/Discontinued; rationale required |
+
+## Monthly Work & Hours APIs
+
+`{id}` under `/relationships/` is the relationship UUID. Lists are filtered to what the caller may see (drafts never reach the Supervisee).
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| GET / POST | `/api/v1/relationships/{id}/cycles` | GET: `cycle.view`; POST: `cycle.manage` | list / open monthly cycles |
+| GET / PATCH | `/api/v1/cycles/{id}` | GET: `cycle.view`; PATCH: `cycle.manage` | one cycle with everything recorded that month; PATCH sets a fieldwork month to supervised / concentrated |
+| GET | `/api/v1/relationships/{id}/compliance` | `compliance.view` | monthly and cumulative results, the rules used, and whether they are approved |
+| GET / POST | `/api/v1/relationships/{id}/assignments` | POST: `assignment.create` | list / issue an assignment (`draft: true` saves a draft) |
+| GET / PATCH | `/api/v1/assignments/{id}` | party | one assignment with history and files; edit a draft |
+| POST | `/api/v1/assignments/{id}/issue` | `assignment.create` | issue a draft |
+| POST | `/api/v1/assignments/{id}/submit` | `assignment.submit` | Supervisee submits (multipart, `files`) |
+| POST | `/api/v1/assignments/{id}/request-revision` · `/complete` | `assignment.review` | review outcome |
+| GET | `/api/v1/assignment-attachments/{id}/download` | party | authenticated file download |
+| GET / POST | `/api/v1/relationships/{id}/hours` | POST: `hours.log` (fieldwork only) | list / log hours |
+| PATCH | `/api/v1/hours/{id}` | `hours.log` | the trainee corrects a pending or returned entry; it goes back for verification |
+| POST | `/api/v1/hours/{id}/verify` · `/return` | `hours.verify` | Supervisor verifies or returns |
+| PUT | `/api/v1/relationships/{id}/service-hours` | `service_hours.attest` | RBT / BCaBA monthly service hours (`year`, `month`, `hours`) |
+| GET / POST | `/api/v1/relationships/{id}/sessions` | POST: `session.document` | list / document a session (`draft: true`, `appointment_id`, multipart `files`) |
+| GET / PATCH | `/api/v1/sessions/{id}` | `session.view` | one session; edit or `complete` a draft |
+| GET | `/api/v1/session-attachments/{id}/download` | party | authenticated file download |
+| GET / POST | `/api/v1/relationships/{id}/notes` | Supervisor only | private supervisor notes |
+| GET | `/api/v1/assignments` · `/hours` · `/sessions` | signed-in user | the same records across all of the caller's relationships (global pages) |
+
+## Scheduling APIs (logistics only)
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| GET / POST | `/api/v1/relationships/{id}/appointments` | POST: `appointment.manage` | list / schedule (`repeat_weeks` for a weekly series) |
+| GET | `/api/v1/appointments` | signed-in user | upcoming and past appointments across relationships |
+| GET / PATCH | `/api/v1/appointments/{id}` | party; PATCH: `appointment.manage` | one appointment with history; reschedule (with `reason`) |
+| POST | `/api/v1/appointments/{id}/confirm` | `appointment.confirm` | Supervisee confirms |
+| POST | `/api/v1/appointments/{id}/cancel` · `/complete` · `/no-show` | `appointment.manage` | cancel (with `reason`), mark held, mark no-show |
+| PUT | `/api/v1/appointments/{id}/prep-note` | `prep.submit` (Supervisee) | save the prep note on an upcoming appointment (returned on the appointment) |
+
+None of these change a compliance figure. To count, a held appointment must be documented as a session (`POST .../sessions` with `appointment_id`).
+
+## Competency Assessment APIs
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| GET / POST | `/api/v1/relationships/{id}/assessments` | GET: `assessment.view`; POST: `assessment.manage` | list with a summary / create a draft against a plan competency |
+| GET / PATCH | `/api/v1/assessments/{id}` | as above | one assessment; edit until it is Official |
+| POST | `/api/v1/assessments/{id}/submit` | `assessment.manage` | Draft → Ready for Review (needs a rating) |
+| POST | `/api/v1/assessments/{id}/return` | `assessment.manage` | Ready for Review → Draft |
+| POST | `/api/v1/assessments/{id}/finalize` | `assessment.manage` | → Official (needs evidence); locked afterwards |
 
 ### Path `id` is the relationship UUID
 
@@ -209,6 +300,16 @@ Postgres database: **`akevra_sprint0`**
 | `development_plan_goal` | Goals on a specific IDP version |
 | `development_plan_competency` | Competencies on a specific IDP version |
 | `development_plan_milestone` | Milestones on a specific IDP version |
+| `monthly_cycle` | One month of work per relationship |
+| `assignment` / `assignment_event` / `assignment_attachment` | Assignments, their history, and submitted files |
+| `hours_entry` | Fieldwork hours logged by the trainee |
+| `service_hours_attestation` | RBT / BCaBA monthly service hours |
+| `supervision_session` / `session_attachment` | Documented supervision sessions and their files |
+| `relationship_note` | Private supervisor notes |
+| `appointment` / `appointment_event` | Scheduled sessions and their history |
+| `pre_supervision_note` | Supervisee prep notes on appointments |
+| `competency_assessment` | Competency ratings (Draft → Ready for Review → Official) |
+| `compliance_rule_set` / `compliance_rule_parameter` | Approved compliance rules (empty until AKEVRA approves) |
 | `audit_event` | Who changed what, and when |
 
 ---
@@ -276,6 +377,10 @@ The production deployment will be on AWS ECS/Fargate + RDS PostgreSQL + S3 to be
 | `ALLOWED_HOSTS` | `your-app.up.railway.app` |
 | `CSRF_TRUSTED_ORIGINS` | `https://your-app.up.railway.app` |
 | `MFA_ENCRYPTION_KEY` | generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `CORS_ORIGINS` | the frontend URL, e.g. `https://akevra-frontend.vercel.app` |
+| `FRONTEND_URL` | the same frontend URL (used in invitation and password-reset emails) |
+| `MEDIA_ROOT` | path of a persistent volume for uploaded files, e.g. `/data/media` |
+| `ASSIGNMENT_ATTACHMENT_MAX_MB` | optional upload limit per file (default `10`) |
 
 After first deploy, run once via Railway Console:
 
@@ -284,6 +389,20 @@ python manage.py migrate
 python manage.py seed_sprint0
 ```
 
+Run `python manage.py migrate` again after every deploy that adds migrations.
+
+**Uploaded files:** assignment and session files are stored on disk at `MEDIA_ROOT`. The Railway container disk is wiped on every deploy, so attach a Railway **Volume** and set `MEDIA_ROOT` to its mount path. Without it, uploaded files are lost on redeploy (the database records stay). Production moves files to S3.
+
+**Compliance rule approval:** after AKEVRA signs off [docs/COMPLIANCE_RULES_FOR_APPROVAL.md](docs/COMPLIANCE_RULES_FOR_APPROVAL.md), run once:
+
+```
+python manage.py approve_compliance_rules --name "AKEVRA Approved" --effective-from 2026-01-01
+```
+
+Change a single value with `--set TRACK:KEY=VALUE` (e.g. `--set rbt_ongoing_supervision:min_supervision_percent=5`), or later in the Django admin under Compliance rule sets.
+
+**Frontend (Vercel):** project root `akevra-frontend`, build `npm run build`, output `dist`, env `VITE_API_URL`. Details in `akevra-frontend/README.md`.
+
 Swagger: `https://your-app.up.railway.app/api/docs/`
 
 ---
@@ -291,16 +410,33 @@ Swagger: `https://your-app.up.railway.app/api/docs/`
 ## Project layout
 
 ```
-akevra/
-  apps/        accounts, organizations, rbac, supervision, audit, core
-  config/      Django settings and URLs
+akevra02/
+  apps/             accounts, organizations, rbac, supervision, audit, core
+  config/           Django settings and URLs
+  docs/             compliance rules for AKEVRA approval
+  akevra-frontend/  React app (Vite)
   manage.py
 ```
 
-Supervision Setup lives in `apps/supervision/` (models, services, views, tests). Sprint 0 acceptance tests remain in `apps/core/tests.py`.
+| Area | Backend files (`apps/supervision/`) |
+|---|---|
+| Supervision Setup | `models.py`, `services.py`, `views.py`, `tests.py` |
+| Monthly Work & Hours | `monthly.py`, `monthly_views.py`, `test_monthly_work.py` |
+| Compliance calculations | `compliance.py` (pure functions + versioned BACB defaults) |
+| Scheduling | `scheduling.py`, `scheduling_views.py`, `test_scheduling.py` |
+| Competency Assessments | `assessments.py`, `assessment_views.py`, `test_assessments.py` |
+
+Role permissions are in `apps/rbac/matrix.py`. Row-level security SQL for each table is in `apps/core/sql/`. Sprint 0 acceptance tests remain in `apps/core/tests.py`.
 
 ---
 
 ## Not yet built
 
-Monthly hours, session notes, competency *assessments* (ratings/approvals), compliance calculations, reports, and the AI assistant are for later sprints. The tables exist; those workflows are not built yet.
+- **Reports & Audit** export and the **AI Teaching Assistant** — later sprints
+- Frontend placeholder pages: Active / Closed relationships, the global Compliance page, Settings, Support
+- **Compliance reminders** — the table exists; scheduled reminder emails are not sent yet
+
+Waiting on the client:
+
+- **AKEVRA approval of the compliance rules** — until then, results show "pending AKEVRA approval" (see the approval command above)
+- **File storage on staging** — attach a Railway Volume (`MEDIA_ROOT`) or move uploads to S3-type storage
