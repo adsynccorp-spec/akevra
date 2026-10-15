@@ -544,13 +544,30 @@ def relationship_compliance(relationship, cycles):
         ).aggregate(
             total=Sum("hours"), unrestricted=Sum("hours", filter=Q(activity_category="unrestricted"))
         )
-        return {
-            "track": track,
-            "months": months,
-            "cumulative": evaluate_fieldwork_cumulative(
-                rules, eligible, unrestricted_hours=verified["unrestricted"], accrued_hours=verified["total"]
-            ),
-        }
+        cumulative = evaluate_fieldwork_cumulative(
+            rules, eligible, unrestricted_hours=verified["unrestricted"], accrued_hours=verified["total"]
+        )
+        # Verified hours next to the hours that count: BACB removes hours from a month that misses
+        # its supervision requirements, and the reason is shown per month
+        verified_by_type = {FieldworkSubtype.SUPERVISED: ZERO, FieldworkSubtype.CONCENTRATED: ZERO}
+        breakdown = []
+        for month, (fieldwork_type, counted) in zip(months, eligible):
+            logged = _dec(month["total_hours"])
+            verified_by_type[fieldwork_type] = verified_by_type.get(fieldwork_type, ZERO) + logged
+            breakdown.append({
+                "year": month["year"], "month": month["month"], "fieldwork_type": fieldwork_type,
+                "verified_hours": _out(logged), "counted_hours": _out(_dec(counted)),
+                "reasons": [adjustment["detail"] for adjustment in month.get("adjustments", [])],
+            })
+        verified_total = sum(verified_by_type.values(), ZERO)
+        counted_total = _dec(cumulative["supervised_hours"]) + _dec(cumulative["concentrated_hours"])
+        cumulative.update({
+            "verified_supervised_hours": _out(verified_by_type[FieldworkSubtype.SUPERVISED]),
+            "verified_concentrated_hours": _out(verified_by_type[FieldworkSubtype.CONCENTRATED]),
+            "not_counted_hours": _out(max(ZERO, verified_total - counted_total)),
+            "by_month": breakdown,
+        })
+        return {"track": track, "months": months, "cumulative": cumulative}
 
     if track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
         months_met = 0

@@ -355,6 +355,55 @@ class MonthlyWorkAcceptanceTests(TestCase):
         self.assertEqual(month["rules"]["name"], "RBT Standard 2026 (test)")
 
 
+    def test_04b_client_qa_scenarios(self):
+        """The M4 QA scenarios: RBT month from attested hours + a session + an assignment;
+        fieldwork verified vs counted hours; a second active relationship is named on the page."""
+        jordan = self.as_user("jordan@akevra.test")
+        casey = self.as_user("casey@akevra.test")
+        alex = self.as_user("alex@akevra.test")
+
+        # RBT: 100 attested service hours, one 60-minute individual session with client observation
+        alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "100"}, format="json")
+        jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
+                    {"occurred_on": "2026-10-14", "start_time": "10:00", "end_time": "11:00", "session_type": "individual",
+                     "meeting_method": "in_person", "client_observation": "true"})
+        issued = jordan.post(f"/api/v1/relationships/{self.rbt.id}/assignments",
+                             {"title": "October task", "year": 2026, "month": 10, "due_on": "2026-10-30"}, format="json").data
+        alex.post(f"/api/v1/assignments/{issued['id']}/submit", {"note": "done"})
+        jordan.post(f"/api/v1/assignments/{issued['id']}/request-revision", {"comment": "more"}, format="json")
+        alex.post(f"/api/v1/assignments/{issued['id']}/submit", {"note": "again"})
+        self.assertEqual(jordan.post(f"/api/v1/assignments/{issued['id']}/complete", {}, format="json").data["status"], "completed")
+        october = next(c for c in jordan.get(f"/api/v1/relationships/{self.rbt.id}/cycles").data["cycles"]
+                       if (c["year"], c["month"]) == (2026, 10))
+        self.assertEqual((october["counts"]["sessions"], october["counts"]["assignments_completed"]), (1, 1))
+        month = october["compliance"]
+        self.assertEqual((month["supervision_hours"], month["supervision_percent"], month["remaining_supervision_hours"]), (1.0, 1.0, 4.0))
+        checks = {c["key"]: c["actual"] for c in month["checks"]}
+        self.assertEqual((checks["contacts"], checks["individual_contacts"], checks["observation_contacts"]), (1, 1, 1))
+
+        # Fieldwork: September meets the hours but has 1 of 4 contacts; October has no observation
+        for day, hours in (("2026-09-01", "19"), ("2026-10-01", "14")):
+            jordan.post(f"/api/v1/hours/{self.log_hours(casey, day, hours)['id']}/verify")
+        contact = self.log_hours(casey, "2026-09-02", "1", kind="supervision", supervision_format="individual", client_observation=True)
+        jordan.post(f"/api/v1/hours/{contact['id']}/verify")
+        cumulative = casey.get(f"/api/v1/relationships/{self.fieldwork.id}/compliance").data["cumulative"]
+        self.assertEqual(cumulative["verified_supervised_hours"], 34.0)
+        self.assertEqual(cumulative["supervised_hours"], 5.0)
+        self.assertEqual(cumulative["not_counted_hours"], 29.0)
+        by_month = {(row["year"], row["month"]): row for row in cumulative["by_month"]}
+        self.assertEqual((by_month[(2026, 9)]["verified_hours"], by_month[(2026, 9)]["counted_hours"]), (20.0, 5.0))
+        self.assertIn("1 of 4 required contacts", by_month[(2026, 9)]["reasons"][0])
+        self.assertEqual(by_month[(2026, 10)]["counted_hours"], 0.0)
+        self.assertIn("No observation", by_month[(2026, 10)]["reasons"][0])
+
+        # A second active relationship for the same pair (older data) is named on the detail page
+        parallel = SupervisoryRelationship.objects.create(
+            organization=self.jordan.organization, supervisor=self.jordan, supervisee=self.alex,
+            supervision_track=self.rbt.supervision_track, started_on=date(2026, 10, 14),
+        )
+        detail = jordan.get(f"/api/v1/relationships/{parallel.id}").data
+        self.assertEqual([r["id"] for r in detail["parallel_relationships"]], [str(self.rbt.id)])
+
     # ------------------------------------------------------------------
     # Lists across all of a user's relationships (Assignments / Hours / Sessions pages)
     # ------------------------------------------------------------------

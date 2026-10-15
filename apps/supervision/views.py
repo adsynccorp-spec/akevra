@@ -280,7 +280,16 @@ class RelationshipDetailView(APIView):
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         if not has_permission(request.user_account, "relationship.view", relationship=rel):
             return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
-        return Response(serialize_relationship(rel, request.user_account))
+        # Older data can hold two active relationships for the same pair and pathway (created before
+        # duplicates were refused); name them so records are looked for on the right one
+        others = SupervisoryRelationship.objects.filter(
+            supervisor_id=rel.supervisor_id, supervisee_id=rel.supervisee_id,
+            supervision_track=rel.supervision_track, status=RecordStatus.ACTIVE,
+        ).exclude(pk=rel.pk).order_by("started_on")
+        return Response({
+            **serialize_relationship(rel, request.user_account),
+            "parallel_relationships": [{"id": str(o.id), "started_on": o.started_on.isoformat()} for o in others],
+        })
 
     @extend_schema(tags=["Supervision"], summary="Edit a relationship", request=RelationshipPatchSerializer, operation_id="relationships_partial_update", responses=JSON_RESPONSE)
     def patch(self, request, pk):
