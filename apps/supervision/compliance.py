@@ -164,8 +164,10 @@ def _out(value):
     return None if value is None else float(value.quantize(Decimal("0.01")))
 
 
-def _check(key, label, required, actual, met):
-    return {"key": key, "label": label, "required": required, "actual": actual, "met": bool(met)}
+def _check(key, label, required, actual, met, status=None):
+    """`met` decides the month; `status` is what to show (met / not_met / not_yet_due)."""
+    return {"key": key, "label": label, "required": required, "actual": actual, "met": bool(met),
+            "status": status or ("met" if met else "not_met")}
 
 
 # ---------------------------------------------------------------------------
@@ -385,18 +387,22 @@ def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contact
     if rules.has("max_group_percent"):
         limit = rules.number("max_group_percent")
         share = _dec(group_minutes) / _dec(supervision_minutes) * HUNDRED if supervision_minutes else ZERO
-        checks.append(_check("group_percent", "Group supervision (maximum share)", _out(limit), _out(share),
-                             share <= limit))
+        checks.append(_check("group_percent", "Group supervision (maximum share of supervised time)", _out(limit),
+                             _out(share), share <= limit))
     if rules.has("biweekly_min_minutes") and not reduced_tier and first_half_minutes is not None:
         needed = int(rules.number("biweekly_min_minutes"))
         least = min(first_half_minutes, second_half_minutes or 0)
-        checks.append(_check("biweekly_minutes", "Supervision minutes in each half of the month", needed,
-                             least, least >= needed))
+        # BCaBA Handbook: no less than 1 hour every 2 weeks during the first 1,000 post-certification hours
+        checks.append(_check("biweekly_minutes", "At least 1 hour every 2 weeks (first 1,000 hours; minutes in each half of the month)",
+                             needed, least, least >= needed))
     if rules.has("quarterly_observations") and quarter_observations is not None:
         needed = int(rules.number("quarterly_observations"))
-        # Only due by the quarter's last month; earlier months are not failed for it
+        # Only due by the quarter's last month; earlier months are not failed for it, but show
+        # "not yet due" rather than "met" until the observation happens
+        observed = quarter_observations >= needed
         checks.append(_check("quarterly_observations", "Client observation this quarter", needed,
-                             quarter_observations, quarter_observations >= needed or not quarter_end))
+                             quarter_observations, observed or not quarter_end,
+                             status="met" if observed else ("not_met" if quarter_end else "not_yet_due")))
     met = all(check["met"] for check in checks)
     return {
         **base,

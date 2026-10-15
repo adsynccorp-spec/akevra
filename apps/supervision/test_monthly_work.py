@@ -636,6 +636,16 @@ class CalculationCaseTests(SimpleTestCase):
                 rules = default_rules(SupervisionTrack.BCABA_ONGOING, on)
                 self.assertSubset(expected, evaluate_ongoing_month(rules, **{**defaults, **inputs}), case_id)
 
+    def test_bcaba_observation_shows_not_yet_due_until_it_happens(self):
+        rules = default_rules(SupervisionTrack.BCABA_ONGOING, D2026)
+        inputs = dict(service_hours=100, supervision_minutes=300, contacts=1, individual_contacts=1, observation_contacts=0,
+                      first_half_minutes=150, second_half_minutes=150)
+        status = lambda **extra: next(c["status"] for c in evaluate_ongoing_month(rules, **inputs, **extra)["checks"]
+                                      if c["key"] == "quarterly_observations")
+        self.assertEqual(status(quarter_observations=0), "not_yet_due")
+        self.assertEqual(status(quarter_observations=1), "met")
+        self.assertEqual(status(quarter_observations=0, quarter_end=True), "not_met")
+
     def test_unrestricted_activity_cases(self):
         rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK, D2026)
         for case_id, months, accrued, unrestricted, expected in UNRESTRICTED_CASES:
