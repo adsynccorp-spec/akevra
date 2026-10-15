@@ -584,6 +584,7 @@ BCABA_CASES = [
     ("B3 5% tier, nothing in second half", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=300, second_half_minutes=0, quarter_observations=1), {"status": "shortfall"}),
     ("B4 group more than individual", D2026, dict(service_hours=100, supervision_minutes=300, group_minutes=200, contacts=2, first_half_minutes=150, second_half_minutes=150, quarter_observations=1), {"status": "shortfall"}),
     ("B5 quarter ends without observation", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=150, second_half_minutes=150, quarter_observations=0, quarter_end=True), {"status": "shortfall"}),
+    ("B5b started mid-month, only the second half is required", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=None, second_half_minutes=300, quarter_observations=1), {"status": "met"}),
     ("B6 observation not yet due", D2026, dict(service_hours=100, supervision_minutes=300, contacts=1, first_half_minutes=150, second_half_minutes=150, quarter_observations=0), {"status": "met"}),
     ("B7 no services this month", D2026, dict(service_hours=0, supervision_minutes=0, contacts=0), {"status": "no_service_hours", "met": True}),
     ("B8 2027 flat 5% even after 1,000 h", D2027, dict(service_hours=100, supervision_minutes=120, contacts=1, prior_service_hours=1200, quarter_observations=1), {"status": "shortfall", "required_supervision_percent": 5.0}),

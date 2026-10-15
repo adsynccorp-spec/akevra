@@ -389,9 +389,11 @@ def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contact
         share = _dec(group_minutes) / _dec(supervision_minutes) * HUNDRED if supervision_minutes else ZERO
         checks.append(_check("group_percent", "Group supervision (maximum share of supervised time)", _out(limit),
                              _out(share), share <= limit))
-    if rules.has("biweekly_min_minutes") and not reduced_tier and first_half_minutes is not None:
+    # A half passed as None isn't required (e.g. the relationship started after it ended)
+    halves = [minutes for minutes in (first_half_minutes, second_half_minutes) if minutes is not None]
+    if rules.has("biweekly_min_minutes") and not reduced_tier and halves:
         needed = int(rules.number("biweekly_min_minutes"))
-        least = min(first_half_minutes, second_half_minutes or 0)
+        least = min(halves)
         # BCaBA Handbook: no less than 1 hour every 2 weeks during the first 1,000 post-certification hours
         checks.append(_check("biweekly_minutes", "At least 1 hour every 2 weeks (first 1,000 hours; minutes in each half of the month)",
                              needed, least, least >= needed))
@@ -469,6 +471,8 @@ def _ongoing_month_for(cycle, rules):
     prior_service = _dec(ServiceHoursAttestation.objects.filter(
         earlier, cycle__relationship_id=relationship_id, record_status="active"
     ).aggregate(total=Sum("hours"))["total"]) + _dec(getattr(cycle.relationship, "prior_service_hours", 0))
+    started = cycle.relationship.started_on
+    started_after_first_half = (started.year, started.month) == (cycle.year, cycle.month) and started.day > 14
     quarter_start = (cycle.month - 1) // 3 * 3 + 1
     quarter_observations = SupervisionSession.objects.filter(
         cycle__relationship_id=relationship_id, cycle__year=cycle.year,
@@ -484,7 +488,7 @@ def _ongoing_month_for(cycle, rules):
         individual_contacts=sessions["individual_count"],
         observation_contacts=sessions["observation_count"],
         group_minutes=sessions["group_minutes"] or 0,
-        first_half_minutes=sessions["first_half"] or 0,
+        first_half_minutes=None if started_after_first_half else sessions["first_half"] or 0,
         second_half_minutes=sessions["second_half"] or 0,
         prior_service_hours=prior_service or 0,
         quarter_observations=quarter_observations,
