@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 
 from apps.accounts.models import CredentialType, UserAccount
 from apps.audit.services import write_audit
+from apps.core.models import RecordStatus
 from apps.core.api_serializers import (
     JSON_RESPONSE,
     DevelopmentPlanWriteSerializer,
@@ -221,6 +222,27 @@ class RelationshipListView(APIView):
             return Response(
                 {"detail": "Not permitted to create this supervisory relationship."},
                 status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Two active relationships for the same pair and pathway split a month's records between
+        # them (service hours on one, sessions on the other), so the second one is refused.
+        duplicate = SupervisoryRelationship.objects.filter(
+            supervisor=supervisor,
+            supervisee=supervisee,
+            supervision_track=request.data.get("supervision_track"),
+            status=RecordStatus.ACTIVE,
+        ).first()
+        if duplicate:
+            return Response(
+                {
+                    "detail": (
+                        f"{supervisee.full_name} already has an active relationship with this Supervisor on this "
+                        f"pathway (started {duplicate.started_on:%b %d, %Y}). Use that relationship, or conclude it first."
+                    ),
+                    "code": "relationship_duplicate",
+                    "existing_relationship_id": str(duplicate.id),
+                },
+                status=status.HTTP_409_CONFLICT,
             )
 
         rel = SupervisoryRelationship(

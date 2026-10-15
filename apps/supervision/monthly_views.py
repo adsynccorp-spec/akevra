@@ -747,6 +747,7 @@ def _relationship_summary(rel):
         "supervision_track": rel.supervision_track,
         "supervisee": {"id": str(rel.supervisee_id), "name": rel.supervisee.full_name},
         "supervisor": {"id": str(rel.supervisor_id), "name": rel.supervisor.full_name},
+        "started_on": rel.started_on.isoformat() if rel.started_on else None,
     }
 
 

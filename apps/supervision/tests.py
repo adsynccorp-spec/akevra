@@ -131,6 +131,21 @@ class SupervisionSetupAcceptanceTests(TestCase):
         self.assertTrue(created.data["is_compliance_bearing"])
         self.assertEqual(created.data["supervisee"]["credential_type"], "bcaba")
 
+        # A second active relationship for the same pair and pathway would split the month's records
+        duplicate = self.client.post(
+            "/api/v1/relationships",
+            {
+                "supervisor_id": str(jordan.id),
+                "supervisee_id": str(casey.id),
+                "supervision_track": SupervisionTrack.BCABA_ONGOING,
+                "started_on": "2026-10-14",
+            },
+            format="json",
+        )
+        self.assertEqual(duplicate.status_code, 409, duplicate.data)
+        self.assertEqual(duplicate.data["code"], "relationship_duplicate")
+        self.assertEqual(duplicate.data["existing_relationship_id"], created.data["id"])
+
         self.client = APIClient()
         self.auth("casey@akevra.test")
         self_as_supervisor = self.client.post(
