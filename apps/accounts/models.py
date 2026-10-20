@@ -107,6 +107,8 @@ class UserAccount(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organ
         blank=True,
         default="",
     )
+    # BACB certification number (e.g. 1-01-11007), shown on audit logs
+    certification_number = models.CharField(max_length=40, blank=True, default="")
     status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
 
     class Meta:

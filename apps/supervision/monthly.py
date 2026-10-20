@@ -9,6 +9,8 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.supervision.compliance import service_hours_record
+from apps.supervision.periods import ensure_open, record_service_hours, serialize_events, serialize_service_hours
 from apps.supervision.models import (
     Assignment,
     AssignmentAttachment,
@@ -24,7 +26,6 @@ from apps.supervision.models import (
     SESSION_DERIVED_HOURS_TRACKS,
     MonthlyCycle,
     RelationshipNote,
-    ServiceHoursAttestation,
     SessionAttachment,
     SessionStatus,
     SupervisionSession,
@@ -288,9 +289,11 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
     )
     if not occurred_on:
         raise ValidationError("The date worked is required.")
+    cycle = cycle_for_date(relationship, occurred_on)
+    ensure_open(cycle, "hours")
     entry = HoursEntry(
         organization=relationship.organization,
-        cycle=cycle_for_date(relationship, occurred_on),
+        cycle=cycle,
         occurred_on=occurred_on,
         attested_on=timezone.localdate(),
         hours=parse_decimal(hours, "Hours"),
@@ -310,12 +313,14 @@ def correct_fieldwork_hours(entry, **changes):
     """The Supervisee fixes a pending or returned entry; it goes back for verification."""
     if entry.status == HoursStatus.VERIFIED:
         raise ValidationError("Verified hours can't be changed.")
+    ensure_open(entry.cycle, "hours")
     for field, value in changes.items():
         if field not in HOURS_FIELDS or value is None:
             continue
         setattr(entry, field, parse_decimal(value, "Hours") if field == "hours" else value)
     if entry.occurred_on and (entry.occurred_on.year, entry.occurred_on.month) != (entry.cycle.year, entry.cycle.month):
         entry.cycle = cycle_for_date(entry.cycle.relationship, entry.occurred_on)
+        ensure_open(entry.cycle, "hours")
     entry.status = HoursStatus.PENDING
     entry.return_reason = ""
     entry.attested_on = timezone.localdate()
@@ -326,6 +331,7 @@ def correct_fieldwork_hours(entry, **changes):
 def verify_fieldwork_hours(entry, actor):
     if entry.status != HoursStatus.PENDING:
         raise ValidationError("Only hours waiting for review can be verified.")
+    ensure_open(entry.cycle, "hours")
     entry.status = HoursStatus.VERIFIED
     entry.verified_by = actor
     entry.verified_at = timezone.now()
@@ -336,6 +342,7 @@ def verify_fieldwork_hours(entry, actor):
 def return_fieldwork_hours(entry, actor, *, reason):
     if entry.status != HoursStatus.PENDING:
         raise ValidationError("Only hours waiting for review can be returned.")
+    ensure_open(entry.cycle, "hours")
     if not (reason or "").strip():
         raise ValidationError("Say what needs correcting when returning hours.")
     entry.status = HoursStatus.RETURNED
@@ -410,6 +417,8 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
     _fill_session(session, fields)
     session.cycle = cycle_for_date(relationship, session.occurred_on)
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
+    if not draft:
+        ensure_open(session.cycle, "supervision sessions")
     with transaction.atomic():
         if appointment_id:
             link_session(session, _appointment(appointment_id))
@@ -430,6 +439,7 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
     if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
     if complete:
+        ensure_open(session.cycle, "supervision sessions")
         session.status = SessionStatus.COMPLETED
     with transaction.atomic():
         session.save()
@@ -445,24 +455,10 @@ def add_note(relationship, actor, body):
     )
 
 
-def attest_service_hours(relationship, actor, *, year, month, hours, notes=""):
-    """One attestation per month; attesting again replaces the figure (the change is audited)."""
-    _require_track(
-        relationship,
-        SESSION_DERIVED_HOURS_TRACKS,
-        "Monthly service hours are attested only on RBT or BCaBA ongoing supervision. "
-        "Supervised Fieldwork hours are logged and verified instead.",
-    )
-    cycle = get_or_create_cycle(relationship, int(year), int(month))
-    attestation = cycle.service_attestations.filter(record_status="active").first()
-    if attestation is None:
-        attestation = ServiceHoursAttestation(organization=relationship.organization, cycle=cycle)
-    attestation.hours = parse_decimal(hours, "Service hours")
-    attestation.attested_by = actor
-    attestation.attested_on = timezone.localdate()
-    attestation.notes = notes or ""
-    attestation.save()
-    return attestation
+def attest_service_hours(relationship, actor, *, year, month, hours, notes="", zero_reason="", supporting_reference=""):
+    """The supervisee's shared monthly service hours (see periods.record_service_hours)."""
+    return record_service_hours(relationship, actor, year=year, month=month, hours=hours, notes=notes,
+                                zero_reason=zero_reason, supporting_reference=supporting_reference)
 
 
 # ---------------------------------------------------------------------------
@@ -595,16 +591,8 @@ def serialize_note(note):
     }
 
 
-def serialize_attestation(attestation):
-    if attestation is None:
-        return None
-    return {
-        "id": str(attestation.id),
-        "hours": float(attestation.hours),
-        "attested_by": _person(attestation.attested_by),
-        "attested_on": attestation.attested_on.isoformat(),
-        "notes": attestation.notes,
-    }
+def serialize_attestation(record):
+    return serialize_service_hours(record)
 
 
 def serialize_cycle(cycle, *, compliance=None, detail=False):
@@ -612,7 +600,7 @@ def serialize_cycle(cycle, *, compliance=None, detail=False):
     hours = [h for h in cycle.hours_entries.all() if h.record_status == "active"]
     # Only completed records count; drafts are the Supervisor's work in progress
     sessions = [s for s in cycle.sessions.all() if s.record_status == "active" and s.status == SessionStatus.COMPLETED]
-    attestation = next((a for a in cycle.service_attestations.all() if a.record_status == "active"), None)
+    record = service_hours_record(cycle.relationship.supervisee_id, cycle.year, cycle.month)
     data = {
         "id": str(cycle.id),
         "relationship_id": str(cycle.relationship_id),
@@ -629,11 +617,14 @@ def serialize_cycle(cycle, *, compliance=None, detail=False):
             "sessions": len(sessions),
             "session_minutes": sum(s.duration_minutes for s in sessions),
         },
-        "service_hours": serialize_attestation(attestation),
+        "service_hours": serialize_service_hours(record),
+        "closed_at": cycle.closed_at.isoformat() if cycle.closed_at else None,
+        "closed_by": cycle.closed_by.full_name if cycle.closed_by_id else None,
         "compliance": compliance,
     }
     if detail:
         data["assignments"] = [serialize_assignment(a) for a in assignments]
         data["hours_entries"] = [serialize_hours(h) for h in hours]
         data["sessions"] = [serialize_session(s) for s in sessions]
+        data["status_history"] = serialize_events(cycle)
     return data

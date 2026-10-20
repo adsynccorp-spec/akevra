@@ -89,14 +89,13 @@ def _relationship(pk):
 def _cycles(relationship):
     return (
         MonthlyCycle.objects.filter(relationship=relationship)
-        .select_related("relationship")
+        .select_related("relationship", "closed_by")
         .prefetch_related(
             "assignments__attachments",
             "assignments__issued_by",
             "hours_entries__logged_by",
             "hours_entries__verified_by",
             "sessions__documented_by",
-            "service_attestations__attested_by",
         )
         .order_by("year", "month")
     )
@@ -736,7 +735,7 @@ class ServiceHoursView(APIView):
             attestation = monthly.attest_service_hours(rel, request.user_account, **serializer.validated_data)
         except ValidationError as exc:
             return _bad_request(exc)
-        write_audit(action="service_hours.attest", entity_type="service_hours_attestation",
+        write_audit(action="service_hours.record", entity_type="service_hours_record",
                     entity_id=attestation.id, request=request, after=monthly.serialize_attestation(attestation))
         return Response(monthly.serialize_attestation(attestation))
 

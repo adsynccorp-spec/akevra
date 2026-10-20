@@ -53,6 +53,16 @@ This repository covers:
 - **Prep notes** — the Supervisee writes a pre-supervision note on an upcoming appointment (`prep.submit`); the Supervisor reads it. Not compliance-bearing
 - **Document Session** — a held appointment opens the Log Session screen pre-filled; saving links the session to the appointment
 
+### Reporting periods, shared service hours and audit readiness
+
+- **One service-hours record per supervisee and month**, shared by every relationship (concurrent supervisors never create separate denominators). Supervision is totalled across all of the supervisee's supervisors on the pathway, with each supervisor's contribution listed
+- **Missing vs confirmed zero**: no record = Missing (never treated as zero); 0 hours needs a reason (service hold, illness, …). A correction supersedes the record and keeps the original
+- **Provenance** on service-hours and fieldwork hours records: source type/system/reference, supporting reference, entered by, reviewed by, timestamps
+- **Period status**: Open → Ready for Review → Verified/Closed, every change recorded with who and why. Closing stores a snapshot of the inputs, result and rule-set ID; a closed month reports the snapshot and blocks compliance-bearing changes until it is reopened with a reason
+- **RBT Requirements Coordinator** as a dated designation per supervisee; **BACB certification numbers** on people
+- **Supervision Audit** (Reports & Audit): month-by-month BACB RBT audit-log columns for a supervisee across all supervisors (concluded relationships included), with flags for missing data and a trace to the underlying sessions and service-hours record; CSV export. Pathway-neutral, so the BCaBA log can be mapped from the same rows
+- **Notifications**: in-app bell plus email for scheduling, preparation, assignments, hours, sessions and assessments; `python manage.py send_preparation_reminders` (run hourly) sends one reminder per upcoming session without preparation
+
 ### Competency Assessments
 
 - Supervisor rates a competency from the current development plan (`assessment.manage`)

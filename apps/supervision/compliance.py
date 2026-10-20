@@ -4,8 +4,12 @@ The two hours models never share a calculation path:
 
 - Supervised Fieldwork: only the trainee's self-logged, Supervisor-verified HoursEntry rows.
 - RBT / BCaBA ongoing supervision: supervision time only from Supervisor-authored
-  SupervisionSession records, measured against the Supervisee's self-attested monthly
-  service hours (ServiceHoursAttestation).
+  SupervisionSession records, measured against the Supervisee's monthly service hours
+  (ServiceHoursRecord — one shared record per supervisee and month). Supervision is totalled
+  across every relationship the supervisee has on that pathway, with each supervisor's
+  contribution listed, so concurrent supervisors never create conflicting monthly totals.
+
+A closed (verified) month reports the snapshot stored when it was closed, not a recalculation.
 
 The evaluate_* functions are pure (numbers in, result out) so an approved test-case set can
 run against them directly. Rule values come from the ComplianceRuleSet in force for the month;
@@ -31,7 +35,7 @@ from apps.supervision.models import (
     HoursKind,
     HoursStatus,
     QUALIFYING_MEETING_METHODS,
-    ServiceHoursAttestation,
+    ServiceHoursRecord,
     SessionStatus,
     SessionType,
     SupervisionFormat,
@@ -458,12 +462,27 @@ def _fieldwork_month_for(cycle, rules):
     )
 
 
+def _supervisee_sessions(relationship, **filters):
+    """Qualifying sessions from every relationship this supervisee has on the same pathway."""
+    return SupervisionSession.objects.filter(
+        cycle__relationship__supervisee_id=relationship.supervisee_id,
+        cycle__relationship__supervision_track=relationship.supervision_track,
+        record_status="active", status=SessionStatus.COMPLETED, meeting_method__in=QUALIFYING_MEETING_METHODS,
+        **filters,
+    )
+
+
+def service_hours_record(supervisee_id, year, month):
+    return ServiceHoursRecord.objects.filter(
+        supervisee_id=supervisee_id, year=year, month=month, record_status="active"
+    ).select_related("entered_by", "reviewed_by").first()
+
+
 def _ongoing_month_for(cycle, rules):
     # Only completed, real-time (qualifying) records count; drafts, phone and asynchronous never do
-    active = cycle.sessions.filter(
-        record_status="active", status=SessionStatus.COMPLETED, meeting_method__in=QUALIFYING_MEETING_METHODS
-    )
-    sessions = active.aggregate(
+    rel = cycle.relationship
+    month_sessions = _supervisee_sessions(rel, cycle__year=cycle.year, cycle__month=cycle.month)
+    sessions = month_sessions.aggregate(
         minutes=Sum("duration_minutes"),
         group_minutes=Sum("duration_minutes", filter=Q(session_type=SessionType.GROUP)),
         first_half=Sum("duration_minutes", filter=Q(occurred_on__day__lte=14)),
@@ -472,24 +491,32 @@ def _ongoing_month_for(cycle, rules):
         individual_count=Count("id", filter=Q(session_type=SessionType.INDIVIDUAL)),
         observation_count=Count("id", filter=Q(client_observation=True)),
     )
-    attestation = cycle.service_attestations.filter(record_status="active").first()
-    relationship_id = cycle.relationship_id
-    earlier = Q(cycle__year__lt=cycle.year) | Q(cycle__year=cycle.year, cycle__month__lt=cycle.month)
-    prior_service = _dec(ServiceHoursAttestation.objects.filter(
-        earlier, cycle__relationship_id=relationship_id, record_status="active"
-    ).aggregate(total=Sum("hours"))["total"]) + _dec(getattr(cycle.relationship, "prior_service_hours", 0))
-    started = cycle.relationship.started_on
+    contributions = [
+        {
+            "relationship_id": str(row["cycle__relationship_id"]),
+            "supervisor": f"{row['cycle__relationship__supervisor__first_name']} {row['cycle__relationship__supervisor__last_name']}".strip(),
+            "supervision_hours": _out(_dec(row["minutes"]) / Decimal("60")),
+            "contacts": row["contacts"],
+            "this_relationship": row["cycle__relationship_id"] == rel.id,
+        }
+        for row in month_sessions.values(
+            "cycle__relationship_id", "cycle__relationship__supervisor__first_name", "cycle__relationship__supervisor__last_name"
+        ).annotate(minutes=Sum("duration_minutes"), contacts=Count("id")).order_by("cycle__relationship__started_on")
+    ]
+    record = service_hours_record(rel.supervisee_id, cycle.year, cycle.month)
+    earlier = Q(year__lt=cycle.year) | Q(year=cycle.year, month__lt=cycle.month)
+    prior_service = _dec(ServiceHoursRecord.objects.filter(
+        earlier, supervisee_id=rel.supervisee_id, record_status="active"
+    ).aggregate(total=Sum("hours"))["total"]) + _dec(getattr(rel, "prior_service_hours", 0))
+    started = rel.started_on
     started_after_first_half = (started.year, started.month) == (cycle.year, cycle.month) and started.day > 14
     quarter_start = (cycle.month - 1) // 3 * 3 + 1
-    quarter_observations = SupervisionSession.objects.filter(
-        cycle__relationship_id=relationship_id, cycle__year=cycle.year,
-        cycle__month__gte=quarter_start, cycle__month__lte=cycle.month,
-        client_observation=True, record_status="active", status=SessionStatus.COMPLETED,
-        meeting_method__in=QUALIFYING_MEETING_METHODS,
+    quarter_observations = _supervisee_sessions(
+        rel, cycle__year=cycle.year, cycle__month__gte=quarter_start, cycle__month__lte=cycle.month, client_observation=True,
     ).count()
-    return evaluate_ongoing_month(
+    result = evaluate_ongoing_month(
         rules,
-        service_hours=None if attestation is None else attestation.hours,
+        service_hours=None if record is None else record.hours,
         supervision_minutes=sessions["minutes"] or 0,
         contacts=sessions["contact_count"],
         individual_contacts=sessions["individual_count"],
@@ -501,6 +528,12 @@ def _ongoing_month_for(cycle, rules):
         quarter_observations=quarter_observations,
         quarter_end=cycle.month % 3 == 0,
     )
+    result["service_hours_record"] = None if record is None else {
+        "id": str(record.id), "hours": _out(record.hours), "zero_reason": record.zero_reason,
+        "source_type": record.source_type, "reviewed": record.reviewed_at is not None,
+    }
+    result["contributions"] = contributions
+    return result
 
 
 def rules_date(relationship, cycle):
@@ -515,7 +548,19 @@ def rules_date(relationship, cycle):
     return day
 
 
-def cycle_compliance(cycle):
+def _snapshot_result(cycle):
+    """A closed month reports what was stored when it was closed."""
+    if cycle.status != "closed" or not cycle.closed_snapshot:
+        return None
+    snap = cycle.closed_snapshot
+    return {**snap["result"], "snapshot": {"closed_at": snap.get("closed_at"), "closed_by": snap.get("closed_by"),
+                                            "rule_set_id": snap.get("rule_set_id")}}
+
+
+def cycle_compliance(cycle, *, live=False):
+    """The month's result. `live=True` recalculates even for a closed month (used to build the snapshot)."""
+    if not live and (stored := _snapshot_result(cycle)):
+        return stored
     track = cycle.relationship.supervision_track
     rules = load_rules(track, rules_date(cycle.relationship, cycle))
     if rules is None:
@@ -542,7 +587,11 @@ def relationship_compliance(relationship, cycles):
         for cycle in cycles:
             rules = load_rules(track, rules_date(relationship, cycle))
             last_rules = rules
-            result = _fieldwork_month_for(cycle, rules)
+            stored = _snapshot_result(cycle)
+            if stored:
+                result = {**stored, "_eligible": _dec(stored.get("eligible_hours"))}
+            else:
+                result = _fieldwork_month_for(cycle, rules)
             eligible.append((result["fieldwork_type"], result.pop("_eligible")))
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month,
                            **result, "rules": rules.source})
@@ -584,17 +633,15 @@ def relationship_compliance(relationship, cycles):
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month, **result})
             months_met += 1 if result.get("met") else 0
         # Totals from the raw rows, not the rounded monthly figures
-        cycle_ids = [cycle.id for cycle in cycles]
-        minutes = SupervisionSession.objects.filter(
-            cycle_id__in=cycle_ids, record_status="active", status=SessionStatus.COMPLETED,
-            meeting_method__in=QUALIFYING_MEETING_METHODS,
-        ).aggregate(
-            total=Sum("duration_minutes")
-        )["total"]
+        months_q = Q(pk__in=[])
+        record_q = Q(pk__in=[])
+        for cycle in cycles:
+            months_q |= Q(cycle__year=cycle.year, cycle__month=cycle.month)
+            record_q |= Q(year=cycle.year, month=cycle.month)
+        minutes = _supervisee_sessions(relationship).filter(months_q).aggregate(total=Sum("duration_minutes"))["total"]
         service_total = _dec(
-            ServiceHoursAttestation.objects.filter(cycle_id__in=cycle_ids, record_status="active").aggregate(
-                total=Sum("hours")
-            )["total"]
+            ServiceHoursRecord.objects.filter(record_q, supervisee_id=relationship.supervisee_id, record_status="active")
+            .aggregate(total=Sum("hours"))["total"]
         )
         supervision_total = _dec(minutes) / Decimal("60")
         return {

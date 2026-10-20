@@ -4,6 +4,7 @@ from apps.supervision import monthly_views as mv
 from apps.supervision import scheduling_views as sv
 from apps.supervision import assessment_views as av
 from apps.supervision import notification_views as nv
+from apps.supervision import period_views as pv
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -68,6 +69,15 @@ urlpatterns = [
     path("assessments/<uuid:pk>/submit", av.AssessmentSubmitView.as_view(), name="assessment-submit"),
     path("assessments/<uuid:pk>/return", av.AssessmentReturnView.as_view(), name="assessment-return"),
     path("assessments/<uuid:pk>/finalize", av.AssessmentFinalizeView.as_view(), name="assessment-finalize"),
+    # Reporting periods, shared service hours, audit readiness
+    path("cycles/<uuid:pk>/status", pv.CycleStatusView.as_view(), name="cycle-status"),
+    path("supervisees/<uuid:pk>/service-hours", pv.SuperviseeServiceHoursView.as_view(), name="supervisee-service-hours"),
+    path("service-hours/<uuid:pk>/review", pv.ServiceHoursReviewView.as_view(), name="service-hours-review"),
+    path("supervisees/<uuid:pk>/coordinators", pv.CoordinatorListView.as_view(), name="supervisee-coordinators"),
+    path("coordinators/<uuid:pk>", pv.CoordinatorDetailView.as_view(), name="coordinator-detail"),
+    path("people/<uuid:pk>/certification", pv.CertificationView.as_view(), name="person-certification"),
+    path("supervisees/<uuid:pk>/audit-log", pv.AuditLogView.as_view(), name="supervisee-audit-log"),
+    path("audit/people", pv.AuditPeopleView.as_view(), name="audit-people"),
     # Notifications (the bell)
     path("notifications", nv.NotificationListView.as_view(), name="notifications"),
     path("notifications/read-all", nv.NotificationReadAllView.as_view(), name="notifications-read-all"),

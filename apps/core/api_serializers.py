@@ -240,7 +240,27 @@ class ServiceHoursSerializer(serializers.Serializer):
     year = serializers.IntegerField(min_value=2000, max_value=2100)
     month = serializers.IntegerField(min_value=1, max_value=12)
     hours = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0)
+    zero_reason = serializers.ChoiceField(
+        choices=["no_services_scheduled", "client_unavailable", "illness", "service_hold", "supervisee_absence", "other"],
+        required=False, allow_blank=True, help_text="Required when hours is 0 (a confirmed zero, not missing)",
+    )
     notes = serializers.CharField(required=False, allow_blank=True)
+    supporting_reference = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class CycleStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["open", "ready_for_review", "closed"])
+    reason = serializers.CharField(required=False, allow_blank=True, help_text="Required when reopening a closed month")
+
+
+class CoordinatorSerializer(serializers.Serializer):
+    coordinator_id = serializers.UUIDField()
+    starts_on = serializers.DateField()
+    ends_on = serializers.DateField(required=False, allow_null=True)
+
+
+class CertificationSerializer(serializers.Serializer):
+    certification_number = serializers.CharField(allow_blank=True, max_length=40)
 
 
 # ---------------------------------------------------------------------------

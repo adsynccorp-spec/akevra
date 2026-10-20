@@ -457,8 +457,19 @@ def _same_month(day, cycle, label):
         raise ValidationError(f"{label} must fall within the cycle month ({cycle.year}-{cycle.month:02d}).")
 
 
+class CycleStatus(models.TextChoices):
+    OPEN = "open", "Open"
+    READY_FOR_REVIEW = "ready_for_review", "Ready for Review"
+    CLOSED = "closed", "Verified / Closed"
+
+
 class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """One relationship's month: its assignments, logged hours and supervision sessions."""
+    """One relationship's month: its assignments, logged hours and supervision sessions.
+
+    Open → Ready for Review → Verified/Closed. While open, results are derived from the source
+    records; closing stores a snapshot of the inputs, result and rule set, which is what a closed
+    month reports. Reopening (with a reason) is how a closed month is corrected; every change is
+    kept in MonthlyCycleEvent."""
 
     relationship = models.ForeignKey(
         SupervisoryRelationship,
@@ -467,7 +478,10 @@ class MonthlyCycle(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
     )
     year = models.PositiveIntegerField()
     month = models.PositiveSmallIntegerField()
-    status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
+    status = models.CharField(max_length=32, choices=CycleStatus.choices, default=CycleStatus.OPEN)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    closed_snapshot = models.JSONField(null=True, blank=True)
     # Supervised Fieldwork only: each month is either supervised or concentrated, so a
     # relationship can mix the two across months
     fieldwork_type = models.CharField(
@@ -632,6 +646,11 @@ class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
         null=True,
         blank=True,
     )
+    # Provenance: entered by = logged_by, reviewed by = verified_by
+    source_type = models.CharField(max_length=32, default="self_logged")
+    source_system = models.CharField(max_length=120, blank=True, default="")
+    source_reference = models.CharField(max_length=255, blank=True, default="")
+    supporting_reference = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
         db_table = "hours_entry"
@@ -1027,3 +1046,103 @@ class Notification(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
         db_table = "notification"
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["recipient", "read_at"])]
+
+
+class MonthlyCycleEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """One status change of a monthly cycle (Open / Ready for Review / Verified-Closed / reopened)."""
+
+    cycle = models.ForeignKey(MonthlyCycle, on_delete=models.PROTECT, related_name="events")
+    from_status = models.CharField(max_length=32, choices=CycleStatus.choices)
+    to_status = models.CharField(max_length=32, choices=CycleStatus.choices)
+    actor = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+    reason = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "monthly_cycle_event"
+        ordering = ["created_at"]
+
+
+class ServiceHoursSource(models.TextChoices):
+    SELF_ATTESTED = "self_attested", "Self-attested by the supervisee"
+    ENTERED_FOR_SUPERVISEE = "entered_for_supervisee", "Entered on the supervisee's behalf"
+    IMPORTED = "imported", "Imported"
+    INTEGRATION = "integration", "External system"
+
+
+class ZeroHoursReason(models.TextChoices):
+    NO_SERVICES_SCHEDULED = "no_services_scheduled", "No services scheduled"
+    CLIENT_UNAVAILABLE = "client_unavailable", "Client or caregiver unavailable / vacation"
+    ILLNESS = "illness", "Illness"
+    SERVICE_HOLD = "service_hold", "Service hold"
+    SUPERVISEE_ABSENCE = "supervisee_absence", "Supervisee absence or leave"
+    OTHER = "other", "Other"
+
+
+class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """The supervisee's service (behavior-analytic) hours for one month — one shared record per
+    supervisee and month, whatever the number of supervisors; each relationship contributes only
+    its own supervision. No record means Missing; a record with 0 hours is a confirmed zero and
+    needs a reason. A correction supersedes the record instead of overwriting it."""
+
+    supervisee = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="service_hours_records")
+    year = models.PositiveIntegerField()
+    month = models.PositiveSmallIntegerField()
+    hours = models.DecimalField(max_digits=7, decimal_places=2)
+    zero_reason = models.CharField(max_length=32, choices=ZeroHoursReason.choices, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    # Provenance
+    source_type = models.CharField(max_length=32, choices=ServiceHoursSource.choices, default=ServiceHoursSource.SELF_ATTESTED)
+    source_system = models.CharField(max_length=120, blank=True, default="")
+    source_reference = models.CharField(max_length=255, blank=True, default="")
+    supporting_reference = models.CharField(max_length=255, blank=True, default="")
+    entered_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+    reviewed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    supersedes = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="corrections")
+
+    class Meta:
+        db_table = "service_hours_record"
+        ordering = ["year", "month", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supervisee", "year", "month"],
+                condition=models.Q(record_status="active"),
+                name="one_active_service_hours_per_supervisee_month",
+            )
+        ]
+
+    def clean(self):
+        if not 1 <= self.month <= 12:
+            raise ValidationError("Month must be between 1 and 12.")
+        if self.hours is None or not 0 <= self.hours <= 744:
+            raise ValidationError("Service hours must be between 0 and 744 for one month.")
+        if self.hours == 0 and not self.zero_reason:
+            raise ValidationError("Confirming 0 service hours needs a reason (e.g. no services scheduled, illness, service hold).")
+        if self.hours != 0:
+            self.zero_reason = ""
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class RequirementsCoordinatorDesignation(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A dated designation of an RBT Requirements Coordinator for one supervisee (not an organization role)."""
+
+    supervisee = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="coordinator_designations")
+    coordinator = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="coordinates")
+    starts_on = models.DateField()
+    ends_on = models.DateField(null=True, blank=True)
+    created_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+
+    class Meta:
+        db_table = "requirements_coordinator_designation"
+        ordering = ["starts_on"]
+
+    def clean(self):
+        if self.ends_on and self.ends_on < self.starts_on:
+            raise ValidationError("The end date can't be before the start date.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
