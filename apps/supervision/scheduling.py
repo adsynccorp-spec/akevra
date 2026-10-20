@@ -64,9 +64,12 @@ def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_wee
     return created
 
 
-def _require_open(appointment, verb):
+def _require_open(appointment, verb, target=None):
     if appointment.status not in OPEN:
-        raise ValidationError(f"A {AppointmentStatus(appointment.status).label.lower()} appointment can't be {verb}.")
+        label = AppointmentStatus(appointment.status).label
+        if appointment.status == target:
+            raise ValidationError(f"This appointment is already marked as {label}.")
+        raise ValidationError(f"This appointment is marked as {label}, so it can't be {verb}.")
 
 
 def reschedule(appointment, actor, *, starts_at=None, ends_at=None, reason="", **fields):
@@ -96,7 +99,7 @@ def confirm(appointment, actor):
 
 
 def cancel(appointment, actor, *, reason):
-    _require_open(appointment, "cancelled")
+    _require_open(appointment, "cancelled", AppointmentStatus.CANCELLED)
     if not (reason or "").strip():
         raise ValidationError("Give a reason for cancelling.")
     appointment.cancel_reason = reason.strip()
@@ -105,12 +108,12 @@ def cancel(appointment, actor, *, reason):
 
 def complete(appointment, actor):
     """The meeting happened. This alone counts for nothing: the Supervisor still documents the session."""
-    _require_open(appointment, "completed")
+    _require_open(appointment, "marked as held", AppointmentStatus.COMPLETED)
     return _move(appointment, actor, AppointmentStatus.COMPLETED, "completed")
 
 
 def mark_no_show(appointment, actor):
-    _require_open(appointment, "marked as a no-show")
+    _require_open(appointment, "marked as a no-show", AppointmentStatus.NO_SHOW)
     return _move(appointment, actor, AppointmentStatus.NO_SHOW, "no_show")
 
 
@@ -193,7 +196,9 @@ def serialize_appointment(appointment, *, detail=False):
                 "actor": _person(e.actor),
                 "at": e.created_at.isoformat(),
                 "previous_starts_at": e.previous_starts_at.isoformat() if e.previous_starts_at else None,
+                "previous_ends_at": e.previous_ends_at.isoformat() if e.previous_ends_at else None,
                 "starts_at": e.starts_at.isoformat() if e.starts_at else None,
+                "ends_at": e.ends_at.isoformat() if e.ends_at else None,
                 "reason": e.reason,
             }
             for e in appointment.events.all()

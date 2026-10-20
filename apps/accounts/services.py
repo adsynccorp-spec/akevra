@@ -91,7 +91,7 @@ def serialize_workspace(account):
     elif active_count:
         role_label = "Supervisor" if supervises else "Supervisee"
     else:
-        role_label = CredentialType(account.credential_type).label if account.credential_type else "Member"
+        role_label = CredentialType(account.credential_type).label if account.credential_type else "Clinical Team"
 
     return {
         **serialize_org(account.organization),

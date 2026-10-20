@@ -10,7 +10,7 @@ from apps.audit.services import write_audit
 from apps.core.api_serializers import JSON_RESPONSE, AssessmentWriteSerializer
 from apps.rbac.permissions import HasWorkspace
 from apps.rbac.services import has_permission
-from apps.supervision import assessments
+from apps.supervision import assessments, notifications
 from apps.supervision.models import AssessmentStatus, CompetencyAssessment
 from apps.supervision.monthly_views import _bad_request, _denied, _invalid, _not_found, _relationship
 
@@ -113,6 +113,8 @@ class _AssessmentAction(APIView):
             return _bad_request(exc)
         write_audit(action=f"assessment.{self.action}", entity_type="competency_assessment", entity_id=assessment.id,
                     request=request, before={"status": before}, after={"status": assessment.status})
+        if assessment.status == AssessmentStatus.OFFICIAL:
+            notifications.assessment_finalized(assessment, request.user_account)
         return Response(assessments.serialize_assessment(_queryset().get(pk=pk)))
 
 

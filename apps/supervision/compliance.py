@@ -115,16 +115,23 @@ class Rules:
         return Decimal(str(self.values[key]))
 
 
+def _default_version(track, on_date):
+    versions = [(start, values) for start, values in DEFAULT_RULES.get(track, []) if start <= on_date]
+    return (versions[-1][0], dict(versions[-1][1])) if versions else (None, None)
+
+
 def _defaults_for(track, on_date):
-    versions = [values for start, values in DEFAULT_RULES.get(track, []) if start <= on_date]
-    return dict(versions[-1]) if versions else None
+    return _default_version(track, on_date)[1]
 
 
 def default_rules(track, on_date=None):
-    values = _defaults_for(track, on_date or date.today())
+    start, values = _default_version(track, on_date or date.today())
     if values is None:
         return None
-    return Rules(values, {"name": "Default (BACB)", "approved": False, "note": DEFAULTS_NOTE})
+    # The 2000-01-01 entry is the standard in force before the 2027 BACB changes
+    version = "BACB 2027 requirements" if start and start.year >= 2027 else "BACB current requirements"
+    return Rules(values, {"name": f"Default ({version})", "approved": False, "note": DEFAULTS_NOTE,
+                          "effective_from": start.isoformat() if start and start.year > 2000 else None})
 
 
 def load_rules(track, on_date):
@@ -520,7 +527,8 @@ def cycle_compliance(cycle):
         result = _ongoing_month_for(cycle, rules)
     else:
         return {"status": "not_compliance_bearing", "met": None, "track": track}
-    return {**result, "track": track, "rules": rules.source}
+    # The full parameter set used, so a single month can be audited on its own
+    return {**result, "track": track, "rules": {**rules.source, "parameters": dict(sorted(rules.values.items()))}}
 
 
 def relationship_compliance(relationship, cycles):

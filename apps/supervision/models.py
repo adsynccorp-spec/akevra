@@ -1007,3 +1007,23 @@ class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
 
     class Meta:
         db_table = "ai_suggestion"
+
+
+class Notification(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """An in-app message for one person (the bell). Some are also emailed. Never compliance-bearing."""
+
+    recipient = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="notifications")
+    kind = models.CharField(max_length=48)
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True, default="")
+    link = models.CharField(max_length=300, blank=True, default="")
+    relationship = models.ForeignKey(SupervisoryRelationship, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    # Lets a reminder be sent once per appointment
+    appointment = models.ForeignKey(Appointment, null=True, blank=True, on_delete=models.PROTECT, related_name="notifications")
+    read_at = models.DateTimeField(null=True, blank=True)
+    emailed = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "notification"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["recipient", "read_at"])]

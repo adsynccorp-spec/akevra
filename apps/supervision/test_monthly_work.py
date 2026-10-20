@@ -380,6 +380,10 @@ class MonthlyWorkAcceptanceTests(TestCase):
         self.assertEqual((month["supervision_hours"], month["supervision_percent"], month["remaining_supervision_hours"]), (1.0, 1.0, 4.0))
         checks = {c["key"]: c["actual"] for c in month["checks"]}
         self.assertEqual((checks["contacts"], checks["individual_contacts"], checks["observation_contacts"]), (1, 1, 1))
+        # The month's drawer carries the rule set and every parameter used, for auditing one month alone
+        detail = jordan.get(f"/api/v1/cycles/{october['id']}").data["compliance"]
+        self.assertEqual(detail["rules"]["parameters"]["min_supervision_percent"], "5")
+        self.assertIn("Default (BACB", detail["rules"]["name"])
 
         # Fieldwork: September meets the hours but has 1 of 4 contacts; October has no observation
         for day, hours in (("2026-09-01", "19"), ("2026-10-01", "14")):

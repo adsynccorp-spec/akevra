@@ -29,7 +29,7 @@ from apps.core.api_serializers import (
 from apps.rbac.permissions import HasWorkspace
 from apps.rbac.models import OrgRole
 from apps.rbac.services import has_permission, org_roles_for
-from apps.supervision import monthly
+from apps.supervision import monthly, notifications
 from apps.supervision.compliance import cycle_compliance, relationship_compliance
 from apps.supervision.models import (
     Assignment,
@@ -274,6 +274,8 @@ class AssignmentListView(APIView):
         action = "assignment.draft" if assignment.status == AssignmentStatus.DRAFT else "assignment.issue"
         write_audit(action=action, entity_type="assignment", entity_id=assignment.id, request=request,
                     after={"title": assignment.title, "cycle_id": str(assignment.cycle_id)})
+        if assignment.status != AssignmentStatus.DRAFT:
+            notifications.assignment_event(assignment, request.user_account, "issued")
         return _assignment_response(assignment.id, status.HTTP_201_CREATED)
 
 
@@ -332,6 +334,7 @@ class AssignmentIssueView(APIView):
             return _bad_request(exc)
         write_audit(action="assignment.issue", entity_type="assignment", entity_id=assignment.id, request=request,
                     before={"status": "draft"}, after={"status": assignment.status})
+        notifications.assignment_event(assignment, request.user_account, "issued")
         return _assignment_response(assignment.id)
 
 
@@ -358,6 +361,7 @@ class _AssignmentActionView(APIView):
             return response
         write_audit(action=self.action, entity_type="assignment", entity_id=assignment.id, request=request,
                     before={"status": before}, after={"status": assignment.status})
+        notifications.assignment_event(assignment, request.user_account, assignment.status)
         return _assignment_response(assignment.id)
 
 
@@ -475,6 +479,7 @@ class HoursListView(APIView):
             return _bad_request(exc)
         write_audit(action="hours.log", entity_type="hours_entry", entity_id=entry.id, request=request,
                     after=monthly.serialize_hours(entry))
+        notifications.hours_event(entry, request.user_account, "logged")
         return Response(monthly.serialize_hours(entry), status=status.HTTP_201_CREATED)
 
 
@@ -517,6 +522,7 @@ class HoursVerifyView(APIView):
             return _bad_request(exc)
         write_audit(action="hours.verify", entity_type="hours_entry", entity_id=entry.id, request=request,
                     after={"status": entry.status})
+        notifications.hours_event(entry, request.user_account, "verified")
         return Response(monthly.serialize_hours(entry))
 
 
@@ -536,6 +542,7 @@ class HoursReturnView(APIView):
             return _bad_request(exc)
         write_audit(action="hours.return", entity_type="hours_entry", entity_id=entry.id, request=request,
                     after={"status": entry.status, "return_reason": entry.return_reason})
+        notifications.hours_event(entry, request.user_account, "returned")
         return Response(monthly.serialize_hours(entry))
 
 
@@ -585,6 +592,8 @@ class SessionListView(APIView):
         action = "session.draft" if session.status == SessionStatus.DRAFT else "session.document"
         write_audit(action=action, entity_type="supervision_session", entity_id=session.id,
                     request=request, after={"status": session.status, "occurred_on": session.occurred_on.isoformat()})
+        if session.status == SessionStatus.COMPLETED:
+            notifications.session_documented(session, request.user_account)
         return Response(monthly.serialize_session(_session(session.id)), status=status.HTTP_201_CREATED)
 
 
@@ -642,6 +651,8 @@ class SessionDetailView(APIView):
             return _bad_request(exc)
         write_audit(action="session.document" if complete else "session.draft_update", entity_type="supervision_session",
                     entity_id=session.id, request=request, after={"status": session.status})
+        if complete:
+            notifications.session_documented(session, request.user_account)
         return Response(monthly.serialize_session(_session(session.id)))
 
 

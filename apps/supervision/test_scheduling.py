@@ -159,3 +159,53 @@ class SchedulingAcceptanceTests(TestCase):
         call_command("approve_compliance_rules", name="AKEVRA Approved Oct 2026", effective_from="2026-01-01", verbosity=0)
         self.assertTrue(rules()["approved"])
         self.assertEqual(rules()["name"], "AKEVRA Approved Oct 2026")
+
+    # 7. Notifications (bell + email) for scheduling and preparation; reminders; clearer messages
+    def test_07_notifications_reminders_and_messages(self):
+        from datetime import timedelta
+
+        from django.core import mail
+        from django.utils import timezone
+
+        from apps.supervision.notifications import send_preparation_reminders
+
+        jordan = self.as_user("jordan@akevra.test")
+        alex = self.as_user("alex@akevra.test")
+        start = timezone.now() + timedelta(hours=24)
+        appointment = self.schedule(jordan, start=start.isoformat(), end=(start + timedelta(hours=1)).isoformat()).data["appointments"][0]
+
+        inbox = alex.get("/api/v1/notifications").data
+        self.assertEqual(inbox["unread"], 1)
+        self.assertIn("Supervision scheduled", inbox["notifications"][0]["title"])
+        self.assertTrue(inbox["notifications"][0]["link"].endswith("?tab=sessions"))
+        self.assertTrue(any("Supervision scheduled" in m.subject for m in mail.outbox))
+
+        # One reminder per appointment while preparation is pending
+        self.assertEqual(send_preparation_reminders(), 1)
+        self.assertEqual(send_preparation_reminders(), 0)
+        self.assertEqual(alex.get("/api/v1/notifications").data["unread"], 2)
+
+        # Submitting preparation notifies the Supervisor once
+        alex.put(f"/api/v1/appointments/{appointment['id']}/prep-note", {"body": "Questions on BIP"}, format="json")
+        alex.put(f"/api/v1/appointments/{appointment['id']}/prep-note", {"body": "Questions on BIP (edited)"}, format="json")
+        titles = [n["title"] for n in jordan.get("/api/v1/notifications").data["notifications"]]
+        self.assertEqual(sum("submitted supervision preparation" in t for t in titles), 1)
+
+        # Read state is per person
+        first = alex.get("/api/v1/notifications").data["notifications"][0]
+        self.assertTrue(alex.post(f"/api/v1/notifications/{first['id']}/read").data["read"])
+        self.assertEqual(jordan.post(f"/api/v1/notifications/{first['id']}/read").status_code, 404)
+        alex.post("/api/v1/notifications/read-all")
+        self.assertEqual(alex.get("/api/v1/notifications").data["unread"], 0)
+
+        # A repeated no-show says so plainly
+        jordan.post(f"/api/v1/appointments/{appointment['id']}/no-show")
+        again = jordan.post(f"/api/v1/appointments/{appointment['id']}/no-show")
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("already marked as No-Show", str(again.data))
+
+        # A time-only reschedule keeps the old and new times in history
+        other = self.schedule(jordan, start="2026-11-03T10:00:00Z", end="2026-11-03T11:00:00Z").data["appointments"][0]
+        moved = jordan.patch(f"/api/v1/appointments/{other['id']}", {"starts_at": "2026-11-03T14:00:00Z", "ends_at": "2026-11-03T15:00:00Z", "reason": "clash"}, format="json").data
+        event = moved["events"][-1]
+        self.assertEqual((event["previous_starts_at"][:16], event["starts_at"][:16]), ("2026-11-03T10:00", "2026-11-03T14:00"))

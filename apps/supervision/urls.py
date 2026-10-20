@@ -3,6 +3,7 @@ from django.urls import path
 from apps.supervision import monthly_views as mv
 from apps.supervision import scheduling_views as sv
 from apps.supervision import assessment_views as av
+from apps.supervision import notification_views as nv
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -67,6 +68,10 @@ urlpatterns = [
     path("assessments/<uuid:pk>/submit", av.AssessmentSubmitView.as_view(), name="assessment-submit"),
     path("assessments/<uuid:pk>/return", av.AssessmentReturnView.as_view(), name="assessment-return"),
     path("assessments/<uuid:pk>/finalize", av.AssessmentFinalizeView.as_view(), name="assessment-finalize"),
+    # Notifications (the bell)
+    path("notifications", nv.NotificationListView.as_view(), name="notifications"),
+    path("notifications/read-all", nv.NotificationReadAllView.as_view(), name="notifications-read-all"),
+    path("notifications/<uuid:pk>/read", nv.NotificationReadView.as_view(), name="notification-read"),
     path("hours/<uuid:pk>", mv.HoursDetailView.as_view(), name="hours-detail"),
     path("hours/<uuid:pk>/verify", mv.HoursVerifyView.as_view(), name="hours-verify"),
     path("hours/<uuid:pk>/return", mv.HoursReturnView.as_view(), name="hours-return"),

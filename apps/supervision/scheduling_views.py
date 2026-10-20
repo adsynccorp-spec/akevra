@@ -16,7 +16,7 @@ from apps.core.api_serializers import (
 )
 from apps.rbac.permissions import HasWorkspace
 from apps.rbac.services import has_permission
-from apps.supervision import scheduling
+from apps.supervision import notifications, scheduling
 from apps.supervision.models import Appointment
 from apps.supervision.monthly_views import (
     _bad_request,
@@ -85,6 +85,7 @@ class AppointmentListView(APIView):
         for appointment in created:
             write_audit(action="appointment.schedule", entity_type="appointment", entity_id=appointment.id, request=request,
                         after={"starts_at": appointment.starts_at.isoformat(), "series_id": str(appointment.series_id or "")})
+        notifications.appointments_scheduled(sorted(created, key=lambda a: a.starts_at), request.user_account)
         rows = _appointments().filter(pk__in=[a.pk for a in created]).order_by("starts_at")
         return Response({"appointments": [_with_rights(request, a, rel) for a in rows]}, status=status.HTTP_201_CREATED)
 
@@ -139,6 +140,8 @@ class AppointmentDetailView(APIView):
             return _bad_request(exc)
         write_audit(action="appointment.reschedule", entity_type="appointment", entity_id=appointment.id, request=request,
                     before={"starts_at": before}, after={"starts_at": appointment.starts_at.isoformat()})
+        if before != appointment.starts_at.isoformat():
+            notifications.appointment_changed(appointment, request.user_account, "rescheduled")
         return Response(_with_rights(request, _appointment(pk), rel, detail=True))
 
 
@@ -164,6 +167,7 @@ class _AppointmentAction(APIView):
             return _bad_request(exc)
         write_audit(action=f"appointment.{self.action}", entity_type="appointment", entity_id=appointment.id,
                     request=request, before={"status": before}, after={"status": appointment.status})
+        notifications.appointment_changed(appointment, request.user_account, appointment.status)
         return Response(_with_rights(request, _appointment(pk), rel, detail=True))
 
 
@@ -228,9 +232,12 @@ class PrepNoteView(APIView):
         serializer = PrepNoteSerializer(data=request.data)
         if not serializer.is_valid():
             return _invalid(serializer)
+        first = not appointment.prep_notes.filter(submitted_by=request.user_account, record_status="active").exists()
         try:
             note = scheduling.save_prep_note(appointment, request.user_account, serializer.validated_data["body"])
         except ValidationError as exc:
             return _bad_request(exc)
         write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request)
+        if first:
+            notifications.preparation_submitted(appointment, request.user_account)
         return Response(scheduling.serialize_prep_note(note))

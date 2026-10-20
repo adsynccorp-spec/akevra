@@ -82,7 +82,7 @@ def role_label(credential_type, org_role):
         return OrgRole(org_role).label
     if credential_type:
         return CredentialType(credential_type).label
-    return "Member"
+    return "Clinical Team"
 
 
 # ---------------------------------------------------------------------------

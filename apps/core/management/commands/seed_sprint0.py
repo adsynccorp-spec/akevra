@@ -156,7 +156,9 @@ class Command(BaseCommand):
     def _ensure_qa_sandbox(self):
         """A separate organization for client QA: create and edit freely here; the
         Northshore / Summit data stays untouched as the reference demo."""
-        if Organization.objects.filter(slug=QA_SANDBOX_SLUG).exists():
+        existing = Organization.objects.filter(slug=QA_SANDBOX_SLUG).first()
+        if existing:
+            self._ensure_second_qa_bcba(existing)
             return
         sandbox = Organization.objects.create(name="QA Sandbox", slug=QA_SANDBOX_SLUG)
         admin = account(make_identity("qa.admin@akevra.test"), sandbox, "Quinn", "Admin")
@@ -171,7 +173,15 @@ class Command(BaseCommand):
             supervision_track=SupervisionTrack.RBT_ONGOING,
             started_on=date(2026, 9, 1),
         )
+        self._ensure_second_qa_bcba(sandbox)
         self.stdout.write(self.style.SUCCESS("Added the QA Sandbox organization."))
+
+    def _ensure_second_qa_bcba(self, sandbox):
+        """A second BCBA so a BCBA-to-BCBA professional development pairing can be tested."""
+        if Identity.objects.filter(email="qa.bcba2@akevra.test").exists():
+            return
+        account(make_identity("qa.bcba2@akevra.test"), sandbox, "Riley", "Analyst", CredentialType.BCBA)
+        self.stdout.write(self.style.SUCCESS("Added qa.bcba2@akevra.test (second QA BCBA)."))
 
     def _print_credentials(self):
         self.stdout.write("")
@@ -181,4 +191,4 @@ class Command(BaseCommand):
         self.stdout.write("DEC-057 demo: jordan@akevra.test (Supervisor of Alex, Supervisee of Morgan)")
         self.stdout.write("DEC-058 / BCaBA supervisee population: casey@akevra.test (BCaBA, not an independent Supervisor)")
         self.stdout.write("RBAC-003 party: party.admin@akevra.test  /  non-party: settings.admin@akevra.test")
-        self.stdout.write("QA Sandbox: qa.admin@ (Administrator), qa.bcba@ (BCBA Supervisor), qa.rbt@ (Supervisee), qa.rbt2@ (unassigned RBT)")
+        self.stdout.write("QA Sandbox: qa.admin@ (Administrator), qa.bcba@ (BCBA Supervisor), qa.rbt@ (Supervisee), qa.rbt2@ (unassigned RBT), qa.bcba2@ (second BCBA)")
