@@ -35,6 +35,7 @@ from apps.supervision.models import (
     HoursKind,
     HoursStatus,
     QUALIFYING_MEETING_METHODS,
+    ExternalSupervisionRecord,
     ServiceHoursRecord,
     SessionStatus,
     SessionType,
@@ -473,9 +474,23 @@ def _supervisee_sessions(relationship, **filters):
 
 
 def service_hours_record(supervisee_id, year, month):
+    """Hours worked for this organization (the internal record) — the denominator this
+    organization's supervisors are responsible for."""
     return ServiceHoursRecord.objects.filter(
-        supervisee_id=supervisee_id, year=year, month=month, record_status="active"
+        supervisee_id=supervisee_id, year=year, month=month, scope="internal", record_status="active"
     ).select_related("entered_by", "reviewed_by").first()
+
+
+def external_hours(supervisee_id, year, month):
+    return list(ServiceHoursRecord.objects.filter(
+        supervisee_id=supervisee_id, year=year, month=month, scope="external", record_status="active"
+    ))
+
+
+def external_supervision(supervisee_id, year, month):
+    return list(ExternalSupervisionRecord.objects.filter(
+        supervisee_id=supervisee_id, year=year, month=month, record_status="active"
+    ))
 
 
 def _ongoing_month_for(cycle, rules):
@@ -505,6 +520,7 @@ def _ongoing_month_for(cycle, rules):
     ]
     record = service_hours_record(rel.supervisee_id, cycle.year, cycle.month)
     earlier = Q(year__lt=cycle.year) | Q(year=cycle.year, month__lt=cycle.month)
+    # Practice hours for the BCaBA 1,000-hour step count every source, here or elsewhere
     prior_service = _dec(ServiceHoursRecord.objects.filter(
         earlier, supervisee_id=rel.supervisee_id, record_status="active"
     ).aggregate(total=Sum("hours"))["total"]) + _dec(getattr(rel, "prior_service_hours", 0))
@@ -531,6 +547,36 @@ def _ongoing_month_for(cycle, rules):
     result["service_hours_record"] = None if record is None else {
         "id": str(record.id), "hours": _out(record.hours), "zero_reason": record.zero_reason,
         "source_type": record.source_type, "reviewed": record.reviewed_at is not None,
+    }
+    # External (another agency, self-reported) — part of the supervisee's overall picture only
+    outside_hours = external_hours(rel.supervisee_id, cycle.year, cycle.month)
+    outside_supervision = external_supervision(rel.supervisee_id, cycle.year, cycle.month)
+    for row in outside_supervision:
+        contributions.append({
+            "relationship_id": None, "supervisor": row.supervisor_name, "organization": row.organization_name,
+            "supervision_hours": _out(_dec(row.duration_minutes) / Decimal("60")), "contacts": 1,
+            "this_relationship": False, "source": "external",
+        })
+    for c in contributions:
+        c.setdefault("source", "internal")
+    internal_minutes = _dec(sessions["minutes"])
+    external_minutes = sum((_dec(r.duration_minutes) for r in outside_supervision), ZERO)
+    external_service = sum((_dec(r.hours) for r in outside_hours), ZERO)
+    all_service = None if record is None and not outside_hours else _dec(record.hours if record else 0) + external_service
+    all_supervision = (internal_minutes + external_minutes) / Decimal("60")
+    required_percent = _dec(result["required_supervision_percent"])
+    result["scope"] = "organization"
+    result["overall"] = {
+        "service_hours": _out(all_service),
+        "internal_service_hours": _out(None if record is None else _dec(record.hours)),
+        "external_service_hours": _out(external_service),
+        "external_agencies": sorted({r.external_organization for r in outside_hours} | {r.organization_name for r in outside_supervision}),
+        "supervision_hours": _out(all_supervision),
+        "internal_supervision_hours": _out(internal_minutes / Decimal("60")),
+        "external_supervision_hours": _out(external_minutes / Decimal("60")),
+        "supervision_percent": _out(all_supervision / all_service * HUNDRED) if all_service else None,
+        "required_supervision_hours": _out(all_service * required_percent / HUNDRED) if all_service is not None else None,
+        "remaining_supervision_hours": _out(max(ZERO, all_service * required_percent / HUNDRED - all_supervision)) if all_service is not None else None,
     }
     result["contributions"] = contributions
     return result
@@ -640,7 +686,7 @@ def relationship_compliance(relationship, cycles):
             record_q |= Q(year=cycle.year, month=cycle.month)
         minutes = _supervisee_sessions(relationship).filter(months_q).aggregate(total=Sum("duration_minutes"))["total"]
         service_total = _dec(
-            ServiceHoursRecord.objects.filter(record_q, supervisee_id=relationship.supervisee_id, record_status="active")
+            ServiceHoursRecord.objects.filter(record_q, supervisee_id=relationship.supervisee_id, scope="internal", record_status="active")
             .aggregate(total=Sum("hours"))["total"]
         )
         supervision_total = _dec(minutes) / Decimal("60")

@@ -9,7 +9,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.supervision.compliance import service_hours_record
+from apps.supervision.compliance import external_hours, service_hours_record
 from apps.supervision.periods import ensure_open, record_service_hours, serialize_events, serialize_service_hours
 from apps.supervision.models import (
     Assignment,
@@ -455,10 +455,12 @@ def add_note(relationship, actor, body):
     )
 
 
-def attest_service_hours(relationship, actor, *, year, month, hours, notes="", zero_reason="", supporting_reference=""):
-    """The supervisee's shared monthly service hours (see periods.record_service_hours)."""
+def attest_service_hours(relationship, actor, *, year, month, hours, notes="", zero_reason="", supporting_reference="",
+                         scope="internal", external_organization=""):
+    """The supervisee's monthly service hours by source (see periods.record_service_hours)."""
     return record_service_hours(relationship, actor, year=year, month=month, hours=hours, notes=notes,
-                                zero_reason=zero_reason, supporting_reference=supporting_reference)
+                                zero_reason=zero_reason, supporting_reference=supporting_reference,
+                                scope=scope, external_organization=external_organization)
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +620,7 @@ def serialize_cycle(cycle, *, compliance=None, detail=False):
             "session_minutes": sum(s.duration_minutes for s in sessions),
         },
         "service_hours": serialize_service_hours(record),
+        "external_service_hours": [serialize_service_hours(r) for r in external_hours(cycle.relationship.supervisee_id, cycle.year, cycle.month)],
         "closed_at": cycle.closed_at.isoformat() if cycle.closed_at else None,
         "closed_by": cycle.closed_by.full_name if cycle.closed_by_id else None,
         "compliance": compliance,

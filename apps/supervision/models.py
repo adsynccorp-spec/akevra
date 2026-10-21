@@ -1078,16 +1078,26 @@ class ZeroHoursReason(models.TextChoices):
     OTHER = "other", "Other"
 
 
+class HoursScope(models.TextChoices):
+    INTERNAL = "internal", "This organization"
+    EXTERNAL = "external", "Another agency (self-reported)"
+
+
 class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
-    """The supervisee's service (behavior-analytic) hours for one month — one shared record per
-    supervisee and month, whatever the number of supervisors; each relationship contributes only
-    its own supervision. No record means Missing; a record with 0 hours is a confirmed zero and
-    needs a reason. A correction supersedes the record instead of overwriting it."""
+    """The supervisee's service (behavior-analytic) hours for one month, split by source.
+
+    Per supervisee and month there is one internal record (hours worked for this organization,
+    shared by every relationship here) and optionally one external record per other agency
+    (self-reported), so the supervisee's full monthly picture is kept without creating a
+    denominator per relationship. No internal record means Missing; 0 hours is a confirmed zero
+    and needs a reason. A correction supersedes the record instead of overwriting it."""
 
     supervisee = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="service_hours_records")
     year = models.PositiveIntegerField()
     month = models.PositiveSmallIntegerField()
     hours = models.DecimalField(max_digits=7, decimal_places=2)
+    scope = models.CharField(max_length=16, choices=HoursScope.choices, default=HoursScope.INTERNAL)
+    external_organization = models.CharField(max_length=200, blank=True, default="")
     zero_reason = models.CharField(max_length=32, choices=ZeroHoursReason.choices, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     # Provenance
@@ -1105,9 +1115,9 @@ class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
         ordering = ["year", "month", "created_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["supervisee", "year", "month"],
+                fields=["supervisee", "year", "month", "scope", "external_organization"],
                 condition=models.Q(record_status="active"),
-                name="one_active_service_hours_per_supervisee_month",
+                name="one_active_service_hours_per_supervisee_month_source",
             )
         ]
 
@@ -1120,6 +1130,51 @@ class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
             raise ValidationError("Confirming 0 service hours needs a reason (e.g. no services scheduled, illness, service hold).")
         if self.hours != 0:
             self.zero_reason = ""
+        if self.scope == HoursScope.EXTERNAL and not self.external_organization.strip():
+            raise ValidationError("Name the other agency for externally reported hours.")
+        if self.scope == HoursScope.INTERNAL:
+            self.external_organization = ""
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ExternalSupervisionRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Supervision the supervisee received outside this organization (self-reported or entered on
+    their behalf). Counted in the supervisee's overall monthly picture, attributed to the external
+    supervisor and agency, and never mixed into what this organization's supervisors are responsible for."""
+
+    supervisee = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="external_supervision")
+    year = models.PositiveIntegerField()
+    month = models.PositiveSmallIntegerField()
+    occurred_on = models.DateField()
+    session_type = models.CharField(max_length=16, choices=SessionType.choices, default=SessionType.INDIVIDUAL)
+    duration_minutes = models.PositiveIntegerField()
+    client_observation = models.BooleanField(default=False)
+    supervisor_name = models.CharField(max_length=200)
+    supervisor_certification_number = models.CharField(max_length=40, blank=True, default="")
+    organization_name = models.CharField(max_length=200)
+    notes = models.TextField(blank=True, default="")
+    # Provenance
+    source_type = models.CharField(max_length=32, choices=ServiceHoursSource.choices, default=ServiceHoursSource.SELF_ATTESTED)
+    source_reference = models.CharField(max_length=255, blank=True, default="")
+    supporting_reference = models.CharField(max_length=255, blank=True, default="")
+    entered_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+    reviewed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "external_supervision_record"
+        ordering = ["occurred_on", "created_at"]
+
+    def clean(self):
+        if self.occurred_on:
+            self.year, self.month = self.occurred_on.year, self.occurred_on.month
+        if not self.duration_minutes or not 1 <= self.duration_minutes <= 1440:
+            raise ValidationError("Give the supervision duration in minutes (1–1440).")
+        if not self.supervisor_name.strip() or not self.organization_name.strip():
+            raise ValidationError("Name the external supervisor and their agency.")
 
     def save(self, *args, **kwargs):
         self.full_clean()

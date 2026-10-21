@@ -157,3 +157,43 @@ class ReportingPeriodTests(TestCase):
         # The supervisee can see their own log; an unrelated person can't
         self.assertEqual(alex.get(f"/api/v1/supervisees/{self.alex.id}/audit-log").status_code, 200)
         self.assertEqual(casey.get(f"/api/v1/supervisees/{self.alex.id}/audit-log").status_code, 403)
+
+    def test_internal_and_external_sources(self):
+        """Another agency's hours and supervision are kept, attributed to their source, in one
+        supervisee-month picture — without changing what this organization is responsible for."""
+        jordan, alex, casey = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test"), self.as_user("casey@akevra.test")
+        self.attest(alex, 8, "100")
+        self.session(jordan, self.rbt, "2026-08-05", 300, client_observation=True)
+        refused = self.attest(alex, 8, "40", scope="external")
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("agency", str(refused.data))
+        self.assertEqual(self.attest(alex, 8, "40", scope="external", external_organization="Bright Path ABA").status_code, 200)
+        url = f"/api/v1/supervisees/{self.alex.id}/external-supervision"
+        external = {"occurred_on": "2026-08-12", "duration_minutes": 60, "supervisor_name": "Dana Lee",
+                    "supervisor_certification_number": "1-22-33333", "organization_name": "Bright Path ABA"}
+        self.assertEqual(casey.post(url, external, format="json").status_code, 403)
+        created = alex.post(url, external, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["source_type"], "self_attested")
+
+        month = self.month(jordan, self.rbt, 8)
+        # This organization's requirement: internal hours and internal supervision only
+        self.assertEqual((month["scope"], month["service_hours"], month["supervision_hours"], month["supervision_percent"]),
+                         ("organization", 100.0, 5.0, 5.0))
+        # The supervisee's overall picture includes the other agency, attributed to it
+        overall = month["overall"]
+        self.assertEqual((overall["service_hours"], overall["internal_service_hours"], overall["external_service_hours"]), (140.0, 100.0, 40.0))
+        self.assertEqual((overall["supervision_hours"], overall["external_supervision_hours"]), (6.0, 1.0))
+        self.assertEqual(overall["external_agencies"], ["Bright Path ABA"])
+        self.assertIn({"supervisor": "Dana Lee", "organization": "Bright Path ABA", "source": "external"},
+                      [{k: c.get(k) for k in ("supervisor", "organization", "source")} for c in month["contributions"]])
+        # Only one internal record exists for the month; the external one is separate
+        records = jordan.get(f"/api/v1/supervisees/{self.alex.id}/service-hours").data["records"]
+        self.assertEqual(sorted((r["scope"], r["hours"]) for r in records if r["month"] == 8 and r["status"] == "active"),
+                         [("external", 40.0), ("internal", 100.0)])
+
+        august = jordan.get(f"/api/v1/supervisees/{self.alex.id}/audit-log?start=2026-08&months=1").data["rows"][0]
+        self.assertEqual((august["service_hours"], august["internal_service_hours"], august["external_service_hours"]), (140.0, 100.0, 40.0))
+        self.assertEqual((august["individual_supervision_hours"], august["face_to_face_contacts"]), (6.0, 2))
+        self.assertIn("Dana Lee #1-22-33333", august["people_label"])
+        self.assertIn("Bright Path ABA", august["organizations"])

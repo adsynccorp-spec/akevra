@@ -246,6 +246,21 @@ class ServiceHoursSerializer(serializers.Serializer):
     )
     notes = serializers.CharField(required=False, allow_blank=True)
     supporting_reference = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    scope = serializers.ChoiceField(choices=["internal", "external"], required=False, default="internal",
+                                    help_text="internal = hours for this organization; external = self-reported hours at another agency")
+    external_organization = serializers.CharField(required=False, allow_blank=True, max_length=200, help_text="Required for external hours")
+
+
+class ExternalSupervisionSerializer(serializers.Serializer):
+    occurred_on = serializers.DateField()
+    duration_minutes = serializers.IntegerField(min_value=1, max_value=1440)
+    session_type = serializers.ChoiceField(choices=["individual", "group"], required=False, default="individual")
+    client_observation = serializers.BooleanField(required=False, default=False)
+    supervisor_name = serializers.CharField(max_length=200)
+    supervisor_certification_number = serializers.CharField(required=False, allow_blank=True, max_length=40)
+    organization_name = serializers.CharField(max_length=200)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    supporting_reference = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
 
 class CycleStatusSerializer(serializers.Serializer):

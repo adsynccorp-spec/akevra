@@ -19,6 +19,7 @@ from django.utils import timezone
 from apps.supervision.models import (
     QUALIFYING_MEETING_METHODS,
     CycleStatus,
+    ExternalSupervisionRecord,
     MonthlyCycle,
     RequirementsCoordinatorDesignation,
     ServiceHoursRecord,
@@ -74,9 +75,14 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                 record_status="active", status=SessionStatus.COMPLETED, meeting_method__in=QUALIFYING_MEETING_METHODS,
             ).select_related("cycle__relationship__supervisor", "documented_by").order_by("occurred_on")
         )
-        record = ServiceHoursRecord.objects.filter(supervisee=supervisee, year=year, month=month,
+        record = ServiceHoursRecord.objects.filter(supervisee=supervisee, year=year, month=month, scope="internal",
                                                    record_status="active").select_related("entered_by", "reviewed_by").first()
-        minutes = lambda kind: sum(s.duration_minutes for s in sessions if s.session_type == kind)  # noqa: E731
+        # Another agency (self-reported): part of the RBT's full monthly picture, attributed to its source
+        outside_hours = list(ServiceHoursRecord.objects.filter(supervisee=supervisee, year=year, month=month, scope="external", record_status="active"))
+        outside = list(ExternalSupervisionRecord.objects.filter(supervisee=supervisee, year=year, month=month, record_status="active").select_related("entered_by"))
+        external_service = sum((r.hours for r in outside_hours), Decimal(0))
+        minutes = lambda kind: sum(s.duration_minutes for s in sessions if s.session_type == kind) + sum(  # noqa: E731
+            e.duration_minutes for e in outside if e.session_type == kind)
 
         supervisors = {}
         for s in sessions:
@@ -90,12 +96,19 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                 supervisee=supervisee, record_status="active", starts_on__lt=after
             ).filter(Q(ends_on__isnull=True) | Q(ends_on__gte=first)).select_related("coordinator")
         ]
-        people = list(supervisors.values()) + coordinators
-        organizations = sorted({r.organization.name for r in (in_force or relationships)})
+        external_people = {}
+        for e in outside:
+            external_people[(e.supervisor_name, e.organization_name)] = {
+                "id": None, "name": e.supervisor_name, "certification_number": e.supervisor_certification_number,
+                "role": f"External supervisor ({e.organization_name})",
+            }
+        people = list(supervisors.values()) + list(external_people.values()) + coordinators
+        organizations = sorted({r.organization.name for r in (in_force or relationships)}
+                               | {e.organization_name for e in outside} | {r.external_organization for r in outside_hours})
 
         ended = after <= today
         # No relationship on the pathway that month and nothing recorded: outside supervision, not missing
-        if not in_force and not sessions and record is None:
+        if not in_force and not sessions and record is None and not outside and not outside_hours:
             rows.append({
                 "year": year, "month": month, "month_name": first.strftime("%B"), "period_ended": ended,
                 "under_supervision": False, "service_hours": None, "service_hours_status": "not_supervised", "zero_reason": "",
@@ -126,13 +139,17 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
             "month_name": first.strftime("%B"),
             "period_ended": ended,
             "under_supervision": True,
-            "service_hours": None if record is None else float(record.hours),
+            "service_hours": None if record is None and not outside_hours else float((record.hours if record else 0) + external_service),
+            "internal_service_hours": None if record is None else float(record.hours),
+            "external_service_hours": float(external_service),
             "service_hours_status": "missing" if record is None else ("confirmed_zero" if record.hours == 0 else "recorded"),
             "zero_reason": record.get_zero_reason_display() if record is not None and record.zero_reason else "",
             "individual_supervision_hours": float(Decimal(minutes(SessionType.INDIVIDUAL)) / 60),
             "group_supervision_hours": float(Decimal(minutes(SessionType.GROUP)) / 60),
-            "observations_with_client": sum(1 for s in sessions if s.client_observation),
-            "face_to_face_contacts": len(sessions),
+            "observations_with_client": sum(1 for s in sessions if s.client_observation) + sum(1 for e in outside if e.client_observation),
+            "face_to_face_contacts": len(sessions) + len(outside),
+            "internal_supervision_hours": float(Decimal(sum(s.duration_minutes for s in sessions)) / 60),
+            "external_supervision_hours": float(Decimal(sum(e.duration_minutes for e in outside)) / 60),
             "people": people,
             "people_label": "; ".join(_label(p) for p in people),
             "organizations": organizations,
@@ -148,6 +165,13 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                      "meeting_method": s.meeting_method, "client_observation": s.client_observation,
                      "supervisor": s.cycle.relationship.supervisor.full_name, "relationship_id": str(s.cycle.relationship_id)}
                     for s in sessions
+                ],
+                "external_service_hours": [{"id": str(r.id), "hours": float(r.hours), "organization": r.external_organization} for r in outside_hours],
+                "external_supervision": [
+                    {"id": str(e.id), "date": e.occurred_on.isoformat(), "type": e.session_type, "minutes": e.duration_minutes,
+                     "client_observation": e.client_observation, "supervisor": e.supervisor_name, "organization": e.organization_name,
+                     "entered_by": e.entered_by.full_name}
+                    for e in outside
                 ],
             },
         })

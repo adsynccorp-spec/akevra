@@ -72,6 +72,7 @@ urlpatterns = [
     # Reporting periods, shared service hours, audit readiness
     path("cycles/<uuid:pk>/status", pv.CycleStatusView.as_view(), name="cycle-status"),
     path("supervisees/<uuid:pk>/service-hours", pv.SuperviseeServiceHoursView.as_view(), name="supervisee-service-hours"),
+    path("supervisees/<uuid:pk>/external-supervision", pv.ExternalSupervisionView.as_view(), name="supervisee-external-supervision"),
     path("service-hours/<uuid:pk>/review", pv.ServiceHoursReviewView.as_view(), name="service-hours-review"),
     path("supervisees/<uuid:pk>/coordinators", pv.CoordinatorListView.as_view(), name="supervisee-coordinators"),
     path("coordinators/<uuid:pk>", pv.CoordinatorDetailView.as_view(), name="coordinator-detail"),

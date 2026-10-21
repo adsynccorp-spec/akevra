@@ -9,12 +9,15 @@ from rest_framework.views import APIView
 
 from apps.accounts.models import UserAccount
 from apps.audit.services import write_audit
-from apps.core.api_serializers import JSON_RESPONSE, CertificationSerializer, CoordinatorSerializer, CycleStatusSerializer
+from apps.core.api_serializers import (
+    JSON_RESPONSE, CertificationSerializer, CoordinatorSerializer, CycleStatusSerializer, ExternalSupervisionSerializer,
+)
 from apps.rbac.models import OrgRole
 from apps.rbac.permissions import HasWorkspace
 from apps.rbac.services import org_roles_for
 from apps.supervision import audit_log, periods
 from apps.supervision.models import (
+    ExternalSupervisionRecord,
     MonthlyCycle,
     RequirementsCoordinatorDesignation,
     ServiceHoursRecord,
@@ -265,3 +268,37 @@ class AuditPeopleView(APIView):
                            "certification_number": u.certification_number} for u in directory],
             "can_manage": oversight or SupervisoryRelationship.objects.filter(supervisor=me).exists(),
         })
+
+
+class ExternalSupervisionView(APIView):
+    """Supervision received at another agency: self-reported by the supervisee or entered for them.
+    Part of the supervisee's overall monthly picture, never of this organization's requirement."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Monthly Work"], summary="External (another agency) supervision records for a supervisee", operation_id="external_supervision_list", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        supervisee, can_view, _ = _supervisee_access(request, pk)
+        if supervisee is None:
+            return _not_found()
+        if not can_view:
+            return _forbidden()
+        rows = ExternalSupervisionRecord.objects.filter(supervisee=supervisee, record_status="active").select_related("entered_by", "reviewed_by").order_by("-occurred_on")
+        return Response({"records": [periods.serialize_external_supervision(r) for r in rows]})
+
+    @extend_schema(tags=["Monthly Work"], summary="Report supervision received at another agency", request=ExternalSupervisionSerializer, operation_id="external_supervision_create", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        supervisee, can_view, can_manage = _supervisee_access(request, pk)
+        if supervisee is None:
+            return _not_found()
+        if not (can_manage or request.user_account.id == supervisee.id):
+            return _forbidden()
+        serializer = ExternalSupervisionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        try:
+            row = periods.record_external_supervision(supervisee, request.user_account, **serializer.validated_data)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="external_supervision.record", entity_type="external_supervision_record", entity_id=row.id, request=request)
+        return Response(periods.serialize_external_supervision(row), status=status.HTTP_201_CREATED)

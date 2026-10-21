@@ -18,6 +18,7 @@ from django.utils import timezone
 from apps.supervision.models import (
     SESSION_DERIVED_HOURS_TRACKS,
     CycleStatus,
+    ExternalSupervisionRecord,
     MonthlyCycle,
     MonthlyCycleEvent,
     ServiceHoursRecord,
@@ -44,9 +45,11 @@ def _closed_months_for_supervisee(supervisee_id, year, month):
 # Shared service hours
 # ---------------------------------------------------------------------------
 
-def record_service_hours(relationship, actor, *, year, month, hours, zero_reason="", notes="", supporting_reference=""):
-    """The supervisee states their service hours for a month (0 needs a reason). Replaces the
-    active record by superseding it, so the original stays on file."""
+def record_service_hours(relationship, actor, *, year, month, hours, zero_reason="", notes="", supporting_reference="",
+                         scope="internal", external_organization=""):
+    """The supervisee states their service hours for a month (0 needs a reason): for this
+    organization (`internal`) or self-reported for another agency (`external`, named). Replaces the
+    active record for that source by superseding it, so the original stays on file."""
     from apps.supervision.monthly import get_or_create_cycle, parse_decimal
 
     if relationship.supervision_track not in SESSION_DERIVED_HOURS_TRACKS:
@@ -65,8 +68,10 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
     value = parse_decimal(hours, "Service hours")
     with transaction.atomic():
         get_or_create_cycle(relationship, year, month)
+        external_organization = (external_organization or "").strip() if scope == "external" else ""
         previous = ServiceHoursRecord.objects.select_for_update().filter(
-            supervisee_id=relationship.supervisee_id, year=year, month=month, record_status="active"
+            supervisee_id=relationship.supervisee_id, year=year, month=month, record_status="active",
+            scope=scope, external_organization=external_organization,
         ).first()
         if previous is not None:
             previous.record_status = "superseded"
@@ -77,6 +82,8 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
             year=year,
             month=month,
             hours=value,
+            scope=scope,
+            external_organization=external_organization,
             zero_reason=zero_reason or "",
             notes=notes or "",
             supporting_reference=supporting_reference or "",
@@ -107,6 +114,8 @@ def serialize_service_hours(record):
         "month": record.month,
         "hours": float(record.hours),
         "confirmed_zero": record.hours == 0,
+        "scope": record.scope,
+        "external_organization": record.external_organization,
         "zero_reason": record.zero_reason,
         "zero_reason_label": record.get_zero_reason_display() if record.zero_reason else "",
         "notes": record.notes,
@@ -148,9 +157,13 @@ def _snapshot(cycle, actor):
         "hours_entry_ids": [str(pk) for pk in cycle.hours_entries.filter(record_status="active", status="verified").values_list("id", flat=True)],
     }
     if rel.supervision_track in SESSION_DERIVED_HOURS_TRACKS:
-        record = ServiceHoursRecord.objects.filter(supervisee_id=rel.supervisee_id, year=cycle.year, month=cycle.month,
-                                                   record_status="active").first()
-        inputs["service_hours_record_id"] = str(record.id) if record else None
+        records = ServiceHoursRecord.objects.filter(supervisee_id=rel.supervisee_id, year=cycle.year, month=cycle.month,
+                                                    record_status="active")
+        internal = next((r for r in records if r.scope == "internal"), None)
+        inputs["service_hours_record_id"] = str(internal.id) if internal else None
+        inputs["external_service_hours_record_ids"] = [str(r.id) for r in records if r.scope == "external"]
+        inputs["external_supervision_ids"] = [str(pk) for pk in ExternalSupervisionRecord.objects.filter(
+            supervisee_id=rel.supervisee_id, year=cycle.year, month=cycle.month, record_status="active").values_list("id", flat=True)]
     return {
         "result": result,
         "inputs": inputs,
@@ -208,3 +221,42 @@ def serialize_events(cycle):
         }
         for e in cycle.events.select_related("actor").all()
     ]
+
+
+# ---------------------------------------------------------------------------
+# External supervision (another agency)
+# ---------------------------------------------------------------------------
+
+def record_external_supervision(supervisee, actor, *, occurred_on, duration_minutes, supervisor_name, organization_name,
+                                session_type="individual", client_observation=False, supervisor_certification_number="",
+                                notes="", supporting_reference=""):
+    if _closed_months_for_supervisee(supervisee.id, occurred_on.year, occurred_on.month).exists():
+        raise ValidationError(f"{occurred_on:%B %Y} is verified and closed. Reopen the month to add a correction.")
+    return ExternalSupervisionRecord.objects.create(
+        organization=supervisee.organization, supervisee=supervisee, year=occurred_on.year, month=occurred_on.month,
+        occurred_on=occurred_on, duration_minutes=duration_minutes, session_type=session_type,
+        client_observation=bool(client_observation), supervisor_name=supervisor_name.strip(),
+        supervisor_certification_number=(supervisor_certification_number or "").strip(),
+        organization_name=organization_name.strip(), notes=notes or "", supporting_reference=supporting_reference or "",
+        source_type=ServiceHoursSource.SELF_ATTESTED if actor.id == supervisee.id else ServiceHoursSource.ENTERED_FOR_SUPERVISEE,
+        entered_by=actor,
+    )
+
+
+def serialize_external_supervision(row):
+    return {
+        "id": str(row.id),
+        "occurred_on": row.occurred_on.isoformat(),
+        "session_type": row.session_type,
+        "duration_minutes": row.duration_minutes,
+        "client_observation": row.client_observation,
+        "supervisor_name": row.supervisor_name,
+        "supervisor_certification_number": row.supervisor_certification_number,
+        "organization_name": row.organization_name,
+        "notes": row.notes,
+        "source_type": row.source_type,
+        "supporting_reference": row.supporting_reference,
+        "entered_by": {"id": str(row.entered_by_id), "name": row.entered_by.full_name},
+        "entered_at": row.created_at.isoformat(),
+        "reviewed_by": {"id": str(row.reviewed_by_id), "name": row.reviewed_by.full_name} if row.reviewed_by_id else None,
+    }
