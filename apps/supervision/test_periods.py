@@ -197,3 +197,17 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual((august["individual_supervision_hours"], august["face_to_face_contacts"]), (6.0, 2))
         self.assertIn("Dana Lee #1-22-33333", august["people_label"])
         self.assertIn("Bright Path ABA", august["organizations"])
+
+    def test_supervisee_sees_and_exports_only_their_own_audit_log(self):
+        alex, casey = self.as_user("alex@akevra.test"), self.as_user("casey@akevra.test")
+        self.attest(alex, 8, "90")
+        people = alex.get("/api/v1/audit/people").data
+        self.assertEqual([p["id"] for p in people["supervisees"]], [str(self.alex.id)])
+        self.assertEqual((people["own_only"], people["can_manage"], people["directory"]), (True, False, []))
+        own = alex.get(f"/api/v1/supervisees/{self.alex.id}/audit-log?start=2026-08&months=1&export=csv")
+        self.assertEqual(own.status_code, 200)
+        self.assertIn("August,2026,90.00", own.content.decode())
+        # Read-only: no coordinator changes, nobody else's log
+        self.assertFalse(alex.get(f"/api/v1/supervisees/{self.alex.id}/coordinators").data["can_manage"])
+        self.assertEqual(alex.get(f"/api/v1/supervisees/{UserAccount.objects.get(email='casey@akevra.test').id}/audit-log").status_code, 403)
+        self.assertEqual(casey.get(f"/api/v1/supervisees/{self.alex.id}/audit-log?export=csv").status_code, 403)

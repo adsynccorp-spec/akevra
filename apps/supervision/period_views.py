@@ -259,14 +259,18 @@ class AuditPeopleView(APIView):
                                                         "credential_type": r.supervisee.credential_type,
                                                         "certification_number": r.supervisee.certification_number, "pathways": set()})
             entry["pathways"].add("bcaba" if r.supervision_track == audit_log.PATHWAYS["bcaba"] else "rbt")
-        directory = UserAccount.objects.filter(organization=me.organization, record_status="active").order_by("first_name")
+        can_manage = oversight or SupervisoryRelationship.objects.filter(supervisor=me).exists()
+        # The people directory (for coordinator designations) is only for those who can manage;
+        # a supervisee viewing their own log gets just their own record
+        directory = UserAccount.objects.filter(organization=me.organization, record_status="active").order_by("first_name") if can_manage else []
         return Response({
             "supervisees": [{**p, "pathways": sorted(p["pathways"])} for p in sorted(people.values(), key=lambda p: p["name"])],
             "is_administrator": OrgRole.ADMINISTRATOR in org_roles_for(me),
             "me": str(me.id),
             "directory": [{"id": str(u.id), "name": u.full_name, "credential_type": u.credential_type,
                            "certification_number": u.certification_number} for u in directory],
-            "can_manage": oversight or SupervisoryRelationship.objects.filter(supervisor=me).exists(),
+            "can_manage": can_manage,
+            "own_only": not can_manage,
         })
 
 
