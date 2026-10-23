@@ -7,7 +7,7 @@ from apps.core.api_serializers import JSON_RESPONSE
 from apps.rbac.permissions import HasWorkspace
 from apps.supervision.models import Notification
 from apps.supervision.monthly_views import _not_found
-from apps.supervision.notifications import serialize
+from apps.supervision.notifications import maybe_send_preparation_reminders, serialize
 
 
 def _mine(request):
@@ -19,6 +19,7 @@ class NotificationListView(APIView):
 
     @extend_schema(tags=["Notifications"], summary="My latest notifications and the unread count", operation_id="notifications_list", responses=JSON_RESPONSE)
     def get(self, request):
+        maybe_send_preparation_reminders(request.user_account.organization_id)
         mine = _mine(request)
         return Response({
             "unread": mine.filter(read_at__isnull=True).count(),

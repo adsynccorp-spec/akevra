@@ -130,6 +130,18 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                 flags.append({"code": "missing_certification", "message": f"Certification # missing for {person['name']}."})
         if not supervisee.certification_number:
             flags.append({"code": "missing_supervisee_certification", "message": f"Certification # missing for {supervisee.full_name}."})
+        # Two completed sessions for this supervisee on the same date with overlapping times
+        for i, first_s in enumerate(sessions):
+            for second_s in sessions[i + 1:]:
+                if first_s.occurred_on != second_s.occurred_on:
+                    continue
+                if first_s.start_time and first_s.end_time and second_s.start_time and second_s.end_time:
+                    overlap = first_s.start_time < second_s.end_time and second_s.start_time < first_s.end_time
+                else:
+                    overlap = first_s.duration_minutes == second_s.duration_minutes and first_s.session_type == second_s.session_type
+                if overlap:
+                    flags.append({"code": "possible_duplicate_session",
+                                  "message": f"Possible duplicate sessions on {first_s.occurred_on:%b %d} — review before export."})
         if ended and open_cycles and (record is not None or sessions):
             flags.append({"code": "period_not_closed", "message": "Month has ended but is not verified/closed."})
 

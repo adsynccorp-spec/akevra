@@ -5,9 +5,10 @@ The two hours models never share a calculation path:
 - Supervised Fieldwork: only the trainee's self-logged, Supervisor-verified HoursEntry rows.
 - RBT / BCaBA ongoing supervision: supervision time only from Supervisor-authored
   SupervisionSession records, measured against the Supervisee's monthly service hours
-  (ServiceHoursRecord — one shared record per supervisee and month). Supervision is totalled
-  across every relationship the supervisee has on that pathway, with each supervisor's
-  contribution listed, so concurrent supervisors never create conflicting monthly totals.
+  (ServiceHoursRecord — one shared record per supervisee and month). A relationship's
+  requirement counts only its own sessions; every supervisor's (and other agencies')
+  supervision is shown alongside as the supervisee's overall picture and per-supervisor
+  contributions, so concurrent supervisors never borrow each other's credit.
 
 A closed (verified) month reports the snapshot stored when it was closed, not a recalculation.
 
@@ -139,19 +140,23 @@ def default_rules(track, on_date=None):
                           "effective_from": start.isoformat() if start and start.year > 2000 else None})
 
 
-def load_rules(track, on_date):
-    """The rule set in force for this track on this date, layered over the defaults."""
-    rule_set = (
+def _active_rule_set(track, on_date, organization_id):
+    return (
         ComplianceRuleSet.objects.filter(
-            supervision_track=track,
-            record_status="active",
-            effective_from__lte=on_date,
+            supervision_track=track, record_status="active", effective_from__lte=on_date, organization_id=organization_id,
         )
         .filter(Q(effective_to__isnull=True) | Q(effective_to__gte=on_date))
         .order_by("-effective_from")
+        .select_related("approved_by")
         .prefetch_related("parameters")
         .first()
     )
+
+
+def load_rules(track, on_date, organization_id=None):
+    """The rule set in force for this track on this date, layered over the defaults: the
+    organization's own approved configuration first, then a platform-wide one."""
+    rule_set = (_active_rule_set(track, on_date, organization_id) if organization_id else None) or _active_rule_set(track, on_date, None)
     if rule_set is None:
         return default_rules(track, on_date)
     values = _defaults_for(track, on_date) or {}
@@ -163,6 +168,10 @@ def load_rules(track, on_date):
             "approved": True,
             "effective_from": rule_set.effective_from.isoformat(),
             "rule_set_id": str(rule_set.id),
+            "approved_by": rule_set.approved_by.full_name if rule_set.approved_by_id else None,
+            "approved_at": rule_set.approved_at.isoformat() if rule_set.approved_at else None,
+            "approval_note": rule_set.approval_note,
+            "scope": "organization" if rule_set.organization_id else "platform",
         },
     )
 
@@ -496,8 +505,11 @@ def external_supervision(supervisee_id, year, month):
 def _ongoing_month_for(cycle, rules):
     # Only completed, real-time (qualifying) records count; drafts, phone and asynchronous never do
     rel = cycle.relationship
+    # Every supervisor's sessions this month (for the overall picture and contributions only)
     month_sessions = _supervisee_sessions(rel, cycle__year=cycle.year, cycle__month=cycle.month)
-    sessions = month_sessions.aggregate(
+    all_internal_minutes = _dec(month_sessions.aggregate(total=Sum("duration_minutes"))["total"])
+    # The requirement for this relationship counts only this relationship's own sessions
+    sessions = month_sessions.filter(cycle__relationship=rel).aggregate(
         minutes=Sum("duration_minutes"),
         group_minutes=Sum("duration_minutes", filter=Q(session_type=SessionType.GROUP)),
         first_half=Sum("duration_minutes", filter=Q(occurred_on__day__lte=14)),
@@ -528,7 +540,8 @@ def _ongoing_month_for(cycle, rules):
     started_after_first_half = (started.year, started.month) == (cycle.year, cycle.month) and started.day > 14
     quarter_start = (cycle.month - 1) // 3 * 3 + 1
     quarter_observations = _supervisee_sessions(
-        rel, cycle__year=cycle.year, cycle__month__gte=quarter_start, cycle__month__lte=cycle.month, client_observation=True,
+        rel, cycle__relationship=rel, cycle__year=cycle.year, cycle__month__gte=quarter_start, cycle__month__lte=cycle.month,
+        client_observation=True,
     ).count()
     result = evaluate_ongoing_month(
         rules,
@@ -559,7 +572,7 @@ def _ongoing_month_for(cycle, rules):
         })
     for c in contributions:
         c.setdefault("source", "internal")
-    internal_minutes = _dec(sessions["minutes"])
+    internal_minutes = all_internal_minutes
     external_minutes = sum((_dec(r.duration_minutes) for r in outside_supervision), ZERO)
     external_service = sum((_dec(r.hours) for r in outside_hours), ZERO)
     all_service = None if record is None and not outside_hours else _dec(record.hours if record else 0) + external_service
@@ -587,6 +600,10 @@ def rules_date(relationship, cycle):
     day = date(cycle.year, cycle.month, 1)
     pinned = getattr(relationship, "fieldwork_requirements", "by_month")
     if relationship.supervision_track == SupervisionTrack.SUPERVISED_FIELDWORK:
+        # A recorded application/eligibility year decides the standard when the month isn't pinned by hand
+        year = getattr(relationship, "fieldwork_application_year", None)
+        if pinned == "by_month" and year:
+            pinned = "bacb_2027" if year >= 2027 else "bacb_2022"
         if pinned == "bacb_2022":
             return min(day, date(2026, 12, 1))
         if pinned == "bacb_2027":
@@ -608,7 +625,7 @@ def cycle_compliance(cycle, *, live=False):
     if not live and (stored := _snapshot_result(cycle)):
         return stored
     track = cycle.relationship.supervision_track
-    rules = load_rules(track, rules_date(cycle.relationship, cycle))
+    rules = load_rules(track, rules_date(cycle.relationship, cycle), cycle.organization_id)
     if rules is None:
         return _rules_pending(track)
     if track == SupervisionTrack.SUPERVISED_FIELDWORK:
@@ -631,7 +648,7 @@ def relationship_compliance(relationship, cycles):
         eligible = []
         last_rules = None
         for cycle in cycles:
-            rules = load_rules(track, rules_date(relationship, cycle))
+            rules = load_rules(track, rules_date(relationship, cycle), relationship.organization_id)
             last_rules = rules
             stored = _snapshot_result(cycle)
             if stored:
@@ -673,10 +690,16 @@ def relationship_compliance(relationship, cycles):
         return {"track": track, "months": months, "cumulative": cumulative}
 
     if track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
-        months_met = 0
+        months_met = months_evaluated = months_open = 0
+        today = date.today()
         for cycle in cycles:
             result = cycle_compliance(cycle)
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month, **result})
+            # A month that hasn't ended yet is open, not "not met"
+            if (cycle.year, cycle.month) >= (today.year, today.month) and cycle.status != "closed":
+                months_open += 1
+                continue
+            months_evaluated += 1
             months_met += 1 if result.get("met") else 0
         # Totals from the raw rows, not the rounded monthly figures
         months_q = Q(pk__in=[])
@@ -684,7 +707,7 @@ def relationship_compliance(relationship, cycles):
         for cycle in cycles:
             months_q |= Q(cycle__year=cycle.year, cycle__month=cycle.month)
             record_q |= Q(year=cycle.year, month=cycle.month)
-        minutes = _supervisee_sessions(relationship).filter(months_q).aggregate(total=Sum("duration_minutes"))["total"]
+        minutes = _supervisee_sessions(relationship, cycle__relationship=relationship).filter(months_q).aggregate(total=Sum("duration_minutes"))["total"]
         service_total = _dec(
             ServiceHoursRecord.objects.filter(record_q, supervisee_id=relationship.supervisee_id, scope="internal", record_status="active")
             .aggregate(total=Sum("hours"))["total"]
@@ -698,6 +721,8 @@ def relationship_compliance(relationship, cycles):
                 "supervision_hours": _out(supervision_total),
                 "supervision_percent": _out(supervision_total / service_total * HUNDRED) if service_total else None,
                 "months_met": months_met,
+                "months_evaluated": months_evaluated,
+                "months_open": months_open,
                 "months_total": len(months),
             },
         }

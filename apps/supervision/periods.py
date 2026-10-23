@@ -21,7 +21,9 @@ from apps.supervision.models import (
     ExternalSupervisionRecord,
     MonthlyCycle,
     MonthlyCycleEvent,
+    ServiceHoursPeriodEntry,
     ServiceHoursRecord,
+    ServiceHoursReview,
     ServiceHoursSource,
     SupervisionTrack,
 )
@@ -65,10 +67,26 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
             f"{date(year, month, 1):%B %Y} is verified and closed, so its service hours can't be changed. "
             "Ask your supervisor to reopen the month for a correction."
         )
-    value = parse_decimal(hours, "Service hours")
+    value = parse_decimal(hours if scope != "external_none" else "0", "Service hours")
     with transaction.atomic():
         get_or_create_cycle(relationship, year, month)
+        # The shared month appears on every active relationship the supervisee has on these pathways
+        from calendar import monthrange
+
+        from apps.supervision.models import SupervisoryRelationship
+        month_end = date(year, month, monthrange(year, month)[1])
+        for other in SupervisoryRelationship.objects.filter(
+            supervisee_id=relationship.supervisee_id, supervision_track__in=SESSION_DERIVED_HOURS_TRACKS, status="active",
+            started_on__lte=month_end,
+        ).exclude(pk=relationship.pk):
+            get_or_create_cycle(other, year, month)
         external_organization = (external_organization or "").strip() if scope == "external" else ""
+        others = ServiceHoursRecord.objects.filter(supervisee_id=relationship.supervisee_id, year=year, month=month, record_status="active")
+        if scope == "external_none" and others.filter(scope="external").exists():
+            raise ValidationError("Other-agency hours are already reported for this month, so 'no other agency' can't be confirmed.")
+        if scope == "external":
+            # Reporting another agency replaces an earlier "no other agency" confirmation (kept, superseded)
+            others.filter(scope="external_none").update(record_status="superseded", updated_at=timezone.now())
         previous = ServiceHoursRecord.objects.select_for_update().filter(
             supervisee_id=relationship.supervisee_id, year=year, month=month, record_status="active",
             scope=scope, external_organization=external_organization,
@@ -95,13 +113,81 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
     return record
 
 
-def review_service_hours(record, actor):
+def review_service_hours(record, actor, relationship=None):
+    """Each supervisor reviews the shared record for their own relationship; the review is theirs."""
     if record.record_status != "active":
         raise ValidationError("Only the current service-hours record can be reviewed.")
+    if relationship is not None and (relationship.supervisee_id != record.supervisee_id or relationship.supervisor_id != actor.id):
+        raise ValidationError("Review the hours from one of your own relationships with this supervisee.")
+    if ServiceHoursReview.objects.filter(record=record, reviewer=actor, record_status="active").exists():
+        raise ValidationError("You have already reviewed these hours.")
+    ServiceHoursReview.objects.create(organization=record.organization, record=record, reviewer=actor, relationship=relationship)
     record.reviewed_by = actor
     record.reviewed_at = timezone.now()
     record.save(update_fields=["reviewed_by", "reviewed_at", "updated_at"])
     return record
+
+
+def record_service_period(relationship, actor, *, start_date, end_date, hours, zero_reason="", notes=""):
+    """Service hours since the last confirmed entry (one month at a time). The period rolls into the
+    month's internal record (superseding it with the new total) and is kept for the trail."""
+    from apps.supervision.monthly import parse_decimal
+
+    value = parse_decimal(hours, "Service hours")
+    if end_date < start_date:
+        raise ValidationError("The period's end can't be before its start.")
+    if (start_date.year, start_date.month) != (end_date.year, end_date.month):
+        raise ValidationError("A period must stay within one month; split it at the month end.")
+    if end_date > timezone.localdate():
+        raise ValidationError("A period can't end in the future.")
+    if value == 0 and not zero_reason:
+        raise ValidationError("Confirming no services for the period needs a reason.")
+    overlap = ServiceHoursPeriodEntry.objects.filter(
+        supervisee_id=relationship.supervisee_id, record_status="active", start_date__lte=end_date, end_date__gte=start_date,
+    ).first()
+    if overlap is not None:
+        raise ValidationError(f"Hours for {overlap.start_date:%b %d}–{overlap.end_date:%b %d} are already entered; "
+                              "periods can't overlap.")
+    with transaction.atomic():
+        current = ServiceHoursRecord.objects.filter(
+            supervisee_id=relationship.supervisee_id, year=start_date.year, month=start_date.month, scope="internal", record_status="active",
+        ).first()
+        total = (current.hours if current else 0) + value
+        record = record_service_hours(
+            relationship, actor, year=start_date.year, month=start_date.month, hours=str(total),
+            zero_reason=(zero_reason or "no_services_scheduled") if total == 0 else "",
+            notes=f"Includes {start_date:%b %d}–{end_date:%b %d}: {value} h" + (f" ({notes})" if notes else ""),
+        )
+        # Earlier periods of the month now belong to the new record
+        ServiceHoursPeriodEntry.objects.filter(record__supervisee_id=relationship.supervisee_id, record__year=start_date.year,
+                                               record__month=start_date.month, record_status="active").update(record=record)
+        entry = ServiceHoursPeriodEntry.objects.create(
+            organization=relationship.organization, supervisee=relationship.supervisee, start_date=start_date, end_date=end_date,
+            hours=value, zero_reason=zero_reason or "", notes=notes or "", record=record, entered_by=actor,
+        )
+    return entry, record
+
+
+def last_confirmed_through(supervisee_id):
+    """The last day the supervisee's service hours are accounted for (periods, or a whole attested month)."""
+    from calendar import monthrange
+
+    latest = ServiceHoursPeriodEntry.objects.filter(supervisee_id=supervisee_id, record_status="active").order_by("-end_date").first()
+    through = latest.end_date if latest else None
+    for record in ServiceHoursRecord.objects.filter(supervisee_id=supervisee_id, scope="internal", record_status="active"):
+        if not record.period_entries.filter(record_status="active").exists():
+            month_end = date(record.year, record.month, monthrange(record.year, record.month)[1])
+            covered = min(month_end, timezone.localtime(record.created_at).date())
+            through = covered if through is None or covered > through else through
+    return through
+
+
+def serialize_period(entry):
+    return {
+        "id": str(entry.id), "start_date": entry.start_date.isoformat(), "end_date": entry.end_date.isoformat(),
+        "hours": float(entry.hours), "zero_reason": entry.zero_reason, "notes": entry.notes,
+        "entered_by": entry.entered_by.full_name, "entered_at": entry.created_at.isoformat(),
+    }
 
 
 def serialize_service_hours(record):
@@ -128,6 +214,11 @@ def serialize_service_hours(record):
         "entered_at": record.created_at.isoformat(),
         "reviewed_by": name(record.reviewed_by),
         "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+        "reviews": [
+            {"reviewer": name(r.reviewer), "relationship_id": str(r.relationship_id) if r.relationship_id else None, "at": r.created_at.isoformat()}
+            for r in record.reviews.filter(record_status="active").select_related("reviewer")
+        ],
+        "periods": [serialize_period(p) for p in record.period_entries.filter(record_status="active").select_related("entered_by")],
         "supersedes_id": str(record.supersedes_id) if record.supersedes_id else None,
         # Kept so the existing UI keeps working
         "attested_by": name(record.entered_by),
@@ -190,6 +281,18 @@ def change_status(cycle, actor, to_status, reason=""):
         rel = cycle.relationship
         if rel.supervision_track not in (*SESSION_DERIVED_HOURS_TRACKS, SupervisionTrack.SUPERVISED_FIELDWORK):
             raise ValidationError("Only compliance-bearing months are verified and closed.")
+        # Organization setting: other-agency reporting (or an explicit "none") is required before closing
+        if getattr(cycle.organization, "require_external_reporting", False) and rel.supervision_track in SESSION_DERIVED_HOURS_TRACKS:
+            reported = ServiceHoursRecord.objects.filter(
+                supervisee_id=rel.supervisee_id, year=cycle.year, month=cycle.month, record_status="active",
+                scope__in=["external", "external_none"],
+            ).exists() or ExternalSupervisionRecord.objects.filter(
+                supervisee_id=rel.supervisee_id, year=cycle.year, month=cycle.month, record_status="active").exists()
+            if not reported:
+                raise ValidationError(
+                    "This organization requires other-agency reporting before a month is closed. The supervisee must report "
+                    "other-agency hours/supervision or confirm 'no other agency' for this month."
+                )
     if current == CycleStatus.CLOSED and not reason:
         raise ValidationError("Give a reason for reopening a verified month.")
     with transaction.atomic():

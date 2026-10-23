@@ -5,6 +5,7 @@ from apps.supervision import scheduling_views as sv
 from apps.supervision import assessment_views as av
 from apps.supervision import notification_views as nv
 from apps.supervision import period_views as pv
+from apps.supervision import settings_views as stv
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -14,6 +15,7 @@ from apps.supervision.views import (
     EligiblePartiesView,
     IntakeView,
     MilestoneTransitionView,
+    PriorHoursReviewView,
     PlanLibraryView,
     RelationshipDetailView,
     RelationshipListView,
@@ -26,6 +28,7 @@ urlpatterns = [
     path("relationships", RelationshipListView.as_view(), name="relationship-list"),
     path("relationships/<uuid:pk>", RelationshipDetailView.as_view(), name="relationship-detail"),
     path("relationships/<uuid:pk>/intake", IntakeView.as_view(), name="relationship-intake"),
+    path("relationships/<uuid:pk>/prior-hours/review", PriorHoursReviewView.as_view(), name="relationship-prior-hours-review"),
     path(
         "relationships/<uuid:pk>/development-plans",
         DevelopmentPlanListView.as_view(),
@@ -63,6 +66,7 @@ urlpatterns = [
     path("appointments/<uuid:pk>/complete", sv.AppointmentCompleteView.as_view(), name="appointment-complete"),
     path("appointments/<uuid:pk>/no-show", sv.AppointmentNoShowView.as_view(), name="appointment-no-show"),
     path("appointments/<uuid:pk>/prep-note", sv.PrepNoteView.as_view(), name="appointment-prep-note"),
+    path("relationships/<uuid:pk>/preparation", sv.PreparationTemplateView.as_view(), name="relationship-preparation"),
     # Competency assessments
     path("relationships/<uuid:pk>/assessments", av.AssessmentListView.as_view(), name="relationship-assessments"),
     path("assessments/<uuid:pk>", av.AssessmentDetailView.as_view(), name="assessment-detail"),
@@ -72,6 +76,7 @@ urlpatterns = [
     # Reporting periods, shared service hours, audit readiness
     path("cycles/<uuid:pk>/status", pv.CycleStatusView.as_view(), name="cycle-status"),
     path("supervisees/<uuid:pk>/service-hours", pv.SuperviseeServiceHoursView.as_view(), name="supervisee-service-hours"),
+    path("relationships/<uuid:pk>/service-hours/periods", pv.ServiceHoursPeriodView.as_view(), name="relationship-service-hours-periods"),
     path("supervisees/<uuid:pk>/external-supervision", pv.ExternalSupervisionView.as_view(), name="supervisee-external-supervision"),
     path("service-hours/<uuid:pk>/review", pv.ServiceHoursReviewView.as_view(), name="service-hours-review"),
     path("supervisees/<uuid:pk>/coordinators", pv.CoordinatorListView.as_view(), name="supervisee-coordinators"),
@@ -79,6 +84,10 @@ urlpatterns = [
     path("people/<uuid:pk>/certification", pv.CertificationView.as_view(), name="person-certification"),
     path("supervisees/<uuid:pk>/audit-log", pv.AuditLogView.as_view(), name="supervisee-audit-log"),
     path("audit/people", pv.AuditPeopleView.as_view(), name="audit-people"),
+    # Settings: compliance rule approval and organization settings
+    path("compliance-rules", stv.ComplianceRulesView.as_view(), name="compliance-rules"),
+    path("compliance-rules/approve", stv.ComplianceRulesApproveView.as_view(), name="compliance-rules-approve"),
+    path("organization/settings", stv.OrganizationSettingsView.as_view(), name="organization-settings"),
     # Notifications (the bell)
     path("notifications", nv.NotificationListView.as_view(), name="notifications"),
     path("notifications/read-all", nv.NotificationReadAllView.as_view(), name="notifications-read-all"),

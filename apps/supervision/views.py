@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
@@ -111,7 +112,19 @@ def serialize_relationship(rel, viewer=None):
         "started_on": rel.started_on.isoformat(),
         "status": rel.status,
         "fieldwork_requirements": rel.fieldwork_requirements,
+        "fieldwork_standard_basis": rel.fieldwork_standard_basis,
+        "fieldwork_application_year": rel.fieldwork_application_year,
+        "fieldwork_standard_note": rel.fieldwork_standard_note,
         "prior_service_hours": float(rel.prior_service_hours),
+        "prior_service_hours_detail": {
+            "hours": float(rel.prior_service_hours),
+            "source": rel.prior_service_hours_source,
+            "as_of": rel.prior_service_hours_as_of.isoformat() if rel.prior_service_hours_as_of else None,
+            "entered_by": rel.prior_service_hours_entered_by.full_name if rel.prior_service_hours_entered_by_id else None,
+            "entered_at": rel.prior_service_hours_entered_at.isoformat() if rel.prior_service_hours_entered_at else None,
+            "reviewed_by": rel.prior_service_hours_reviewed_by.full_name if rel.prior_service_hours_reviewed_by_id else None,
+            "reviewed_at": rel.prior_service_hours_reviewed_at.isoformat() if rel.prior_service_hours_reviewed_at else None,
+        },
     }
     if viewer is not None:
         data["your_role"] = relationship_role_for(viewer, rel)
@@ -149,7 +162,7 @@ def visible_relationships(user_account):
     organization for a Clinical Director. RLS already limits rows to the workspace."""
     from apps.rbac.models import OrgRole
 
-    qs = SupervisoryRelationship.objects.select_related("supervisor", "supervisee")
+    qs = SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by")
     if OrgRole.CLINICAL_DIRECTOR in org_roles_for(user_account):
         return qs
     return qs.filter(Q(supervisor=user_account) | Q(supervisee=user_account))
@@ -157,7 +170,7 @@ def visible_relationships(user_account):
 
 def _get_relationship(pk):
     return (
-        SupervisoryRelationship.objects.select_related("supervisor", "supervisee")
+        SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by")
         .filter(pk=pk)
         .first()
     )
@@ -310,11 +323,41 @@ class RelationshipDetailView(APIView):
                 setattr(rel, field, request.data[field] or "")
         if "fieldwork_requirements" in request.data:
             rel.fieldwork_requirements = request.data["fieldwork_requirements"] or "by_month"
+        prior_changed = False
         if "prior_service_hours" in request.data:
             try:
-                rel.prior_service_hours = Decimal(str(request.data["prior_service_hours"] or 0))
+                value = Decimal(str(request.data["prior_service_hours"] or 0))
             except (InvalidOperation, ValueError):
                 return Response({"detail": "Prior service hours must be a number."}, status=status.HTTP_400_BAD_REQUEST)
+            prior_changed = prior_changed or value != rel.prior_service_hours
+            rel.prior_service_hours = value
+        if "prior_service_hours_source" in request.data:
+            source = (request.data["prior_service_hours_source"] or "").strip()
+            prior_changed = prior_changed or source != rel.prior_service_hours_source
+            rel.prior_service_hours_source = source
+        if "prior_service_hours_as_of" in request.data:
+            raw = request.data["prior_service_hours_as_of"]
+            try:
+                as_of = date.fromisoformat(raw) if raw else None
+            except ValueError:
+                return Response({"detail": "Give the as-of date as YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+            prior_changed = prior_changed or as_of != rel.prior_service_hours_as_of
+            rel.prior_service_hours_as_of = as_of
+        if prior_changed:
+            # A changed opening balance is re-entered: who and when, and it needs a fresh review
+            rel.prior_service_hours_entered_by = request.user_account
+            rel.prior_service_hours_entered_at = timezone.now()
+            rel.prior_service_hours_reviewed_by = None
+            rel.prior_service_hours_reviewed_at = None
+        for field in ("fieldwork_standard_basis", "fieldwork_standard_note"):
+            if field in request.data:
+                setattr(rel, field, (request.data[field] or "").strip())
+        if "fieldwork_application_year" in request.data:
+            raw = request.data["fieldwork_application_year"]
+            try:
+                rel.fieldwork_application_year = int(raw) if raw not in (None, "") else None
+            except (TypeError, ValueError):
+                return Response({"detail": "The application/eligibility year must be a year like 2027."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             rel.save()
         except ValidationError as exc:
@@ -744,3 +787,24 @@ class PlanLibraryView(APIView):
     )
     def get(self, request):
         return Response(serialize_library(request.query_params.get("track") or None))
+
+
+class PriorHoursReviewView(APIView):
+    """A second person confirms the BCaBA opening balance (prior post-certification hours)."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Supervision"], summary="Mark the prior post-certification hours reviewed", request=None, operation_id="prior_hours_review", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        rel = _get_relationship(pk)
+        if rel is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not has_permission(request.user_account, "relationship.edit", relationship=rel):
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        if not rel.prior_service_hours_entered_at:
+            return Response({"detail": "Enter the prior hours (with their source) before reviewing them."}, status=status.HTTP_400_BAD_REQUEST)
+        rel.prior_service_hours_reviewed_by = request.user_account
+        rel.prior_service_hours_reviewed_at = timezone.now()
+        rel.save(update_fields=["prior_service_hours_reviewed_by", "prior_service_hours_reviewed_at", "updated_at"])
+        write_audit(action="prior_hours.review", entity_type="supervisory_relationship", entity_id=rel.id, request=request)
+        return Response(serialize_relationship(rel, request.user_account))

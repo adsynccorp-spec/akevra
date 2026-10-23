@@ -80,7 +80,11 @@ class SuperviseeServiceHoursView(APIView):
             return _forbidden()
         rows = ServiceHoursRecord.objects.filter(supervisee=supervisee).exclude(record_status="archived") \
             .select_related("entered_by", "reviewed_by").order_by("-year", "-month", "-created_at")
-        return Response({"records": [periods.serialize_service_hours(r) for r in rows]})
+        through = periods.last_confirmed_through(supervisee.id)
+        return Response({
+            "records": [periods.serialize_service_hours(r) for r in rows],
+            "last_confirmed_through": through.isoformat() if through else None,
+        })
 
 
 class ServiceHoursReviewView(APIView):
@@ -96,7 +100,9 @@ class ServiceHoursReviewView(APIView):
         if not can_manage:
             return _forbidden()
         try:
-            periods.review_service_hours(record, request.user_account)
+            rel = SupervisoryRelationship.objects.filter(pk=request.data.get("relationship_id")).first() if request.data.get("relationship_id") else \
+                SupervisoryRelationship.objects.filter(supervisee_id=record.supervisee_id, supervisor=request.user_account).order_by("-started_on").first()
+            periods.review_service_hours(record, request.user_account, rel)
         except ValidationError as exc:
             return _bad_request(exc)
         write_audit(action="service_hours.review", entity_type="service_hours_record", entity_id=record.id, request=request)
@@ -225,8 +231,17 @@ class AuditLogView(APIView):
             else:
                 total = today.year * 12 + today.month - 1 - months
                 start_year, start_month = total // 12, total % 12 + 1
+            # A From / To range (inclusive) overrides the month count
+            if request.query_params.get("end"):
+                end_year, end_month = (int(x) for x in request.query_params["end"].split("-"))
+                span = (end_year * 12 + end_month) - (start_year * 12 + start_month) + 1
+                if not 1 <= end_month <= 12 or span < 1:
+                    return Response({"detail": "The To month must be on or after the From month."}, status=status.HTTP_400_BAD_REQUEST)
+                if span > 36:
+                    return Response({"detail": "Choose a range of at most 36 months."}, status=status.HTTP_400_BAD_REQUEST)
+                months = span
         except ValueError:
-            return Response({"detail": "Use start=YYYY-MM and a whole number of months."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Use start=YYYY-MM (and end=YYYY-MM or months=N)."}, status=status.HTTP_400_BAD_REQUEST)
         pathway = request.query_params.get("pathway") or ("bcaba" if supervisee.credential_type == "bcaba" else "rbt")
         if pathway not in audit_log.PATHWAYS:
             return Response({"detail": "pathway must be rbt or bcaba."}, status=status.HTTP_400_BAD_REQUEST)
@@ -306,3 +321,39 @@ class ExternalSupervisionView(APIView):
             return _bad_request(exc)
         write_audit(action="external_supervision.record", entity_type="external_supervision_record", entity_id=row.id, request=request)
         return Response(periods.serialize_external_supervision(row), status=status.HTTP_201_CREATED)
+
+
+class ServiceHoursPeriodView(APIView):
+    """Service hours since the last confirmed entry, for a date range within one month (Supervisee)."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Monthly Work"], summary="Add service hours for a date range since the last confirmed entry", request=None,
+                   operation_id="service_hours_period", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        from datetime import date as _date
+
+        from apps.supervision.monthly_views import _denied, _relationship
+
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if denied := _denied(request, "service_hours.attest", rel, "service_hours_period", "new"):
+            return denied
+        try:
+            start, end = _date.fromisoformat(str(request.data.get("start_date"))), _date.fromisoformat(str(request.data.get("end_date")))
+        except ValueError:
+            return Response({"detail": "Give start_date and end_date as YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+        if rel.supervisee_id != request.user_account.id:
+            return _forbidden()
+        try:
+            entry, record = periods.record_service_period(rel, request.user_account, start_date=start, end_date=end,
+                                                          hours=request.data.get("hours"), zero_reason=request.data.get("zero_reason") or "",
+                                                          notes=request.data.get("notes") or "")
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="service_hours.period", entity_type="service_hours_period_entry", entity_id=entry.id, request=request,
+                    after={"start": start.isoformat(), "end": end.isoformat(), "hours": str(entry.hours), "month_total": str(record.hours)})
+        through = periods.last_confirmed_through(rel.supervisee_id)
+        return Response({"period": periods.serialize_period(entry), "record": periods.serialize_service_hours(record),
+                         "last_confirmed_through": through.isoformat() if through else None}, status=status.HTTP_201_CREATED)

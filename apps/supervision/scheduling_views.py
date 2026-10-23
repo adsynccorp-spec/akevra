@@ -85,7 +85,10 @@ class AppointmentListView(APIView):
         for appointment in created:
             write_audit(action="appointment.schedule", entity_type="appointment", entity_id=appointment.id, request=request,
                         after={"starts_at": appointment.starts_at.isoformat(), "series_id": str(appointment.series_id or "")})
-        notifications.appointments_scheduled(sorted(created, key=lambda a: a.starts_at), request.user_account)
+        ordered = sorted(created, key=lambda a: a.starts_at)
+        if ordered:
+            scheduling.attach_waiting_prep(ordered[0])
+        notifications.appointments_scheduled(ordered, request.user_account)
         rows = _appointments().filter(pk__in=[a.pk for a in created]).order_by("starts_at")
         return Response({"appointments": [_with_rights(request, a, rel) for a in rows]}, status=status.HTTP_201_CREATED)
 
@@ -234,10 +237,46 @@ class PrepNoteView(APIView):
             return _invalid(serializer)
         first = not appointment.prep_notes.filter(submitted_by=request.user_account, record_status="active").exists()
         try:
-            note = scheduling.save_prep_note(appointment, request.user_account, serializer.validated_data["body"])
+            note = scheduling.save_prep_note(appointment, request.user_account, body=serializer.validated_data.get("body", ""),
+                                             answers=serializer.validated_data.get("answers"))
         except ValidationError as exc:
             return _bad_request(exc)
         write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request)
         if first:
             notifications.preparation_submitted(appointment, request.user_account)
+        return Response(scheduling.serialize_prep_note(note))
+
+
+class PreparationTemplateView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Scheduling"], summary="The Supervision Preparation Form for this relationship's pathway", operation_id="prep_template", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        from apps.supervision.prep_templates import template_for
+
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if denied := _denied(request, "relationship.view", rel, "relationship", rel.id):
+            return denied
+        key, template = template_for(rel.supervision_track)
+        waiting = scheduling.standalone_prep(rel, request.user_account)
+        return Response({"key": key, **template, "can_prepare": has_permission(request.user_account, "prep.submit", relationship=rel),
+                         "waiting": scheduling.serialize_prep_note(waiting)})
+
+    @extend_schema(tags=["Scheduling"], summary="Start preparation before an appointment is scheduled (Supervisee)", request=PrepNoteSerializer, operation_id="prep_standalone_save", responses=JSON_RESPONSE)
+    def put(self, request, pk):
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if denied := _denied(request, "prep.submit", rel, "pre_supervision_note", "standalone"):
+            return denied
+        serializer = PrepNoteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        try:
+            note = scheduling.save_standalone_prep(rel, request.user_account, serializer.validated_data.get("answers") or {})
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request, metadata={"standalone": True})
         return Response(scheduling.serialize_prep_note(note))

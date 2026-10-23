@@ -169,6 +169,17 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
     # BCaBA ongoing supervision: post-certification service hours delivered before this record began,
     # so the 5% -> 2% step after 1,000 hours is reached at the right time
     prior_service_hours = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    # BCaBA opening balance: where the prior post-certification hours come from, as of when, and who entered / reviewed them
+    prior_service_hours_source = models.CharField(max_length=255, blank=True, default="")
+    prior_service_hours_as_of = models.DateField(null=True, blank=True)
+    prior_service_hours_entered_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    prior_service_hours_entered_at = models.DateTimeField(null=True, blank=True)
+    prior_service_hours_reviewed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    prior_service_hours_reviewed_at = models.DateTimeField(null=True, blank=True)
+    # Supervised Fieldwork: why the 2022 or 2027 BACB standard applies to this trainee
+    fieldwork_standard_basis = models.CharField(max_length=32, blank=True, default="")
+    fieldwork_application_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    fieldwork_standard_note = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "supervisory_relationship"
@@ -880,15 +891,21 @@ class AppointmentEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, 
 class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
     """The Supervisee's preparation for an appointment. Never compliance-bearing."""
 
+    # Empty until the preparation is attached to a scheduled appointment (preparation can start first)
     appointment = models.ForeignKey(
-        Appointment, on_delete=models.PROTECT, related_name="prep_notes"
+        Appointment, on_delete=models.PROTECT, related_name="prep_notes", null=True, blank=True
     )
+    relationship = models.ForeignKey(SupervisoryRelationship, on_delete=models.PROTECT, null=True, blank=True, related_name="prep_notes")
     submitted_by = models.ForeignKey(
         "accounts.UserAccount",
         on_delete=models.PROTECT,
         related_name="prep_notes",
     )
-    body = models.TextField()
+    body = models.TextField(blank=True, default="")
+    # Structured Supervision Preparation Form answers ({question_key: answer}) and the template used
+    template_key = models.CharField(max_length=32, blank=True, default="")
+    answers = models.JSONField(default=dict, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "pre_supervision_note"
@@ -943,6 +960,11 @@ class ComplianceRuleSet(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel)
     effective_from = models.DateField()
     effective_to = models.DateField(null=True, blank=True)
     supervision_track = models.CharField(max_length=64, choices=SupervisionTrack.choices)
+    # An organization's own approved configuration takes precedence over a platform-wide one (null)
+    organization = models.ForeignKey("organizations.Organization", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    approved_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approval_note = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "compliance_rule_set"
@@ -1081,6 +1103,8 @@ class ZeroHoursReason(models.TextChoices):
 class HoursScope(models.TextChoices):
     INTERNAL = "internal", "This organization"
     EXTERNAL = "external", "Another agency (self-reported)"
+    # An explicit "no work or supervision at any other agency this month" confirmation
+    EXTERNAL_NONE = "external_none", "No other agency (confirmed)"
 
 
 class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
@@ -1122,6 +1146,11 @@ class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
         ]
 
     def clean(self):
+        if self.scope == HoursScope.EXTERNAL_NONE:
+            # "No other agency this month": a confirmed zero with its reason built in
+            self.hours = 0
+            self.zero_reason = self.zero_reason or ZeroHoursReason.NO_SERVICES_SCHEDULED
+            self.external_organization = ""
         if not 1 <= self.month <= 12:
             raise ValidationError("Month must be between 1 and 12.")
         if self.hours is None or not 0 <= self.hours <= 744:
@@ -1197,6 +1226,51 @@ class RequirementsCoordinatorDesignation(UUIDPrimaryKeyModel, TimestampedModel, 
     def clean(self):
         if self.ends_on and self.ends_on < self.starts_on:
             raise ValidationError("The end date can't be before the start date.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ServiceHoursReview(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """One supervisor's review of the shared service-hours record, for their own relationship —
+    so reviewer accountability stays with each supervisor."""
+
+    record = models.ForeignKey(ServiceHoursRecord, on_delete=models.PROTECT, related_name="reviews")
+    reviewer = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+    relationship = models.ForeignKey(SupervisoryRelationship, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+
+    class Meta:
+        db_table = "service_hours_review"
+        ordering = ["created_at"]
+
+
+class ServiceHoursPeriodEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Service hours for a date range since the last confirmed entry (within one month). Each
+    entry rolls into that month's internal ServiceHoursRecord, which it references."""
+
+    supervisee = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="service_hours_periods")
+    start_date = models.DateField()
+    end_date = models.DateField()
+    hours = models.DecimalField(max_digits=7, decimal_places=2)
+    zero_reason = models.CharField(max_length=32, choices=ZeroHoursReason.choices, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    record = models.ForeignKey(ServiceHoursRecord, on_delete=models.PROTECT, related_name="period_entries")
+    entered_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+
+    class Meta:
+        db_table = "service_hours_period_entry"
+        ordering = ["start_date", "created_at"]
+
+    def clean(self):
+        if self.end_date < self.start_date:
+            raise ValidationError("The period's end can't be before its start.")
+        if (self.start_date.year, self.start_date.month) != (self.end_date.year, self.end_date.month):
+            raise ValidationError("A period must stay within one month; split it at the month end.")
+        if self.hours is None or self.hours < 0:
+            raise ValidationError("Hours can't be negative.")
+        if self.hours == 0 and not self.zero_reason:
+            raise ValidationError("Confirming no services for the period needs a reason.")
 
     def save(self, *args, **kwargs):
         self.full_clean()

@@ -52,10 +52,14 @@ class ReportingPeriodTests(TestCase):
         self.session(jordan, self.rbt, "2026-08-04", 60, client_observation=True)
         self.session(morgan, self.second, "2026-08-18", 120)
 
-        # One record serves both relationships; supervision is totalled with each contribution listed
+        # One service-hours record serves both relationships, but each relationship's requirement
+        # counts only its own sessions; the supervisee's overall picture shows both supervisors
         mine, theirs = self.month(jordan, self.rbt, 8), self.month(morgan, self.second, 8)
+        self.assertEqual((mine["service_hours"], mine["supervision_hours"], mine["supervision_percent"]), (100.0, 1.0, 1.0))
+        self.assertEqual((theirs["service_hours"], theirs["supervision_hours"], theirs["supervision_percent"]), (100.0, 2.0, 2.0))
+        self.assertEqual(({c["key"]: c["actual"] for c in theirs["checks"]}["observation_contacts"]), 0)
         for result in (mine, theirs):
-            self.assertEqual((result["service_hours"], result["supervision_hours"], result["supervision_percent"]), (100.0, 3.0, 3.0))
+            self.assertEqual((result["overall"]["supervision_hours"], result["overall"]["internal_supervision_hours"]), (3.0, 3.0))
         self.assertEqual(sorted(c["supervision_hours"] for c in mine["contributions"]), [1.0, 2.0])
         self.assertEqual([c["this_relationship"] for c in mine["contributions"] if c["supervision_hours"] == 1.0], [True])
         self.assertEqual(ServiceHoursRecord.objects.filter(supervisee=self.alex, year=2026, month=8, record_status="active").count(), 1)

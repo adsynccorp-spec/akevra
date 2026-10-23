@@ -95,7 +95,25 @@ def preparation_submitted(appointment, actor):
     )
 
 
-def send_preparation_reminders(now=None, window_hours=48):
+_last_reminder_run = {}
+
+
+def maybe_send_preparation_reminders(organization_id, every_minutes=2):
+    """Runs the reminder check for one organization at most every few minutes, from ordinary
+    requests (the bell polls), so reminders go out even where no scheduled job is available."""
+    now = timezone.now()
+    last = _last_reminder_run.get(organization_id)
+    if last and (now - last).total_seconds() < every_minutes * 60:
+        return 0
+    _last_reminder_run[organization_id] = now
+    try:
+        return send_preparation_reminders(now=now, organization_id=organization_id)
+    except Exception:  # noqa: BLE001 - never break the request that triggered it
+        logger.exception("Preparation reminder check failed")
+        return 0
+
+
+def send_preparation_reminders(now=None, window_hours=48, organization_id=None):
     """Remind supervisees whose upcoming session (within `window_hours`) has no preparation yet.
     Sends one reminder per appointment; the Supervisor's view already shows Preparation Pending."""
     from apps.supervision.models import Appointment, AppointmentStatus, PreSupervisionNote
@@ -107,6 +125,8 @@ def send_preparation_reminders(now=None, window_hours=48):
         starts_at__gt=now,
         starts_at__lte=now + timedelta(hours=window_hours),
     )
+    if organization_id:
+        due = due.filter(organization_id=organization_id)
     sent = 0
     for appointment in due:
         rel = appointment.relationship

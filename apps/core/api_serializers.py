@@ -246,8 +246,9 @@ class ServiceHoursSerializer(serializers.Serializer):
     )
     notes = serializers.CharField(required=False, allow_blank=True)
     supporting_reference = serializers.CharField(required=False, allow_blank=True, max_length=255)
-    scope = serializers.ChoiceField(choices=["internal", "external"], required=False, default="internal",
-                                    help_text="internal = hours for this organization; external = self-reported hours at another agency")
+    scope = serializers.ChoiceField(choices=["internal", "external", "external_none"], required=False, default="internal",
+                                    help_text="internal = hours for this organization; external = self-reported hours at another agency; "
+                                              "external_none = confirm no other agency this month")
     external_organization = serializers.CharField(required=False, allow_blank=True, max_length=200, help_text="Required for external hours")
 
 
@@ -307,7 +308,14 @@ class AppointmentCancelSerializer(serializers.Serializer):
 
 
 class PrepNoteSerializer(serializers.Serializer):
-    body = serializers.CharField()
+    body = serializers.CharField(required=False, allow_blank=True, help_text="Free-text preparation (older form)")
+    answers = serializers.DictField(child=serializers.CharField(allow_blank=True), required=False,
+                                    help_text="Structured Supervision Preparation Form answers {question_key: answer}")
+
+    def validate(self, attrs):
+        if not attrs.get("answers") and not (attrs.get("body") or "").strip():
+            raise serializers.ValidationError("Complete the preparation form before saving.")
+        return attrs
 
 
 class AssessmentWriteSerializer(serializers.Serializer):

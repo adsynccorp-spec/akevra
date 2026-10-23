@@ -174,14 +174,15 @@ class SchedulingAcceptanceTests(TestCase):
         start = timezone.now() + timedelta(hours=24)
         appointment = self.schedule(jordan, start=start.isoformat(), end=(start + timedelta(hours=1)).isoformat()).data["appointments"][0]
 
+        # Opening the bell also runs the reminder check (no scheduled job needed): the session is
+        # within 48 hours and preparation is pending, so a reminder arrives once
         inbox = alex.get("/api/v1/notifications").data
-        self.assertEqual(inbox["unread"], 1)
-        self.assertIn("Supervision scheduled", inbox["notifications"][0]["title"])
-        self.assertTrue(inbox["notifications"][0]["link"].endswith("?tab=sessions"))
+        titles = [n["title"] for n in inbox["notifications"]]
+        self.assertEqual(inbox["unread"], 2)
+        self.assertTrue(any(t.startswith("Supervision scheduled") for t in titles))
+        self.assertTrue(any(t.startswith("Reminder: complete your preparation") for t in titles))
+        self.assertTrue(all(n["link"].endswith("?tab=sessions") for n in inbox["notifications"]))
         self.assertTrue(any("Supervision scheduled" in m.subject for m in mail.outbox))
-
-        # One reminder per appointment while preparation is pending
-        self.assertEqual(send_preparation_reminders(), 1)
         self.assertEqual(send_preparation_reminders(), 0)
         self.assertEqual(alex.get("/api/v1/notifications").data["unread"], 2)
 

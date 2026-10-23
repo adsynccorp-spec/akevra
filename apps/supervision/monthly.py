@@ -409,6 +409,33 @@ def _appointment(appointment_id):
     return appointment
 
 
+def _minutes_of(value):
+    return value.hour * 60 + value.minute
+
+
+def ensure_not_duplicate(session):
+    """A formal session can't be documented twice: another completed session for the same
+    supervisee on the same date whose time overlaps (or, without times, with the same duration,
+    format and method) would give duplicate compliance credit."""
+    rel = session.cycle.relationship
+    others = SupervisionSession.objects.filter(
+        cycle__relationship__supervisee_id=rel.supervisee_id, occurred_on=session.occurred_on,
+        status=SessionStatus.COMPLETED, record_status="active",
+    ).exclude(pk=session.pk).select_related("cycle__relationship__supervisor")
+    for other in others:
+        if session.start_time and session.end_time and other.start_time and other.end_time:
+            clash = _minutes_of(session.start_time) < _minutes_of(other.end_time) and _minutes_of(other.start_time) < _minutes_of(session.end_time)
+        else:
+            clash = (other.duration_minutes == session.duration_minutes and other.session_type == session.session_type
+                     and (other.meeting_method or "") == (session.meeting_method or ""))
+        if clash:
+            when = f" {other.start_time:%H:%M}–{other.end_time:%H:%M}" if other.start_time and other.end_time else ""
+            raise ValidationError(
+                f"A completed session is already documented for {rel.supervisee.full_name} on {other.occurred_on:%b %d, %Y}{when} "
+                f"(by {other.cycle.relationship.supervisor.full_name}). Duplicate sessions can't count twice — open the existing record instead."
+            )
+
+
 def document_session(relationship, actor, *, draft=False, files=(), appointment_id=None, **fields):
     """A completed record counts toward requirements; a draft doesn't until it is completed."""
     from apps.supervision.scheduling import link_session
@@ -419,6 +446,7 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
     if not draft:
         ensure_open(session.cycle, "supervision sessions")
+        ensure_not_duplicate(session)
     with transaction.atomic():
         if appointment_id:
             link_session(session, _appointment(appointment_id))
@@ -440,6 +468,7 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
     if complete:
         ensure_open(session.cycle, "supervision sessions")
+        ensure_not_duplicate(session)
         session.status = SessionStatus.COMPLETED
     with transaction.atomic():
         session.save()

@@ -9,6 +9,7 @@ from datetime import timedelta
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from apps.supervision.models import (
     Appointment,
@@ -125,17 +126,59 @@ def _move(appointment, actor, status, action, reason=""):
     return appointment
 
 
-def save_prep_note(appointment, actor, body):
-    """The Supervisee's preparation; one per appointment, editable until the appointment is closed."""
-    if not (body or "").strip():
-        raise ValidationError("Write your preparation notes before saving.")
+def _fill_prep(note, relationship, *, body="", answers=None):
+    from apps.supervision.prep_templates import summary, template_for, validate_answers
+
+    key, template = template_for(relationship.supervision_track)
+    if answers is not None:
+        note.answers = validate_answers(template, answers)
+        note.template_key = key
+        note.body = summary(template, note.answers)
+    else:
+        if not (body or "").strip():
+            raise ValidationError("Write your preparation notes before saving.")
+        note.body = body.strip()
+    note.submitted_at = timezone.now()
+
+
+def save_prep_note(appointment, actor, body="", answers=None):
+    """The Supervisee's preparation (the structured Supervision Preparation Form, or free text);
+    one per appointment, editable until the appointment is closed."""
     if appointment.status not in OPEN:
         raise ValidationError("Preparation notes can only be added to an upcoming appointment.")
     note = PreSupervisionNote.objects.filter(appointment=appointment, submitted_by=actor, record_status="active").first()
     if note is None:
-        note = PreSupervisionNote(organization=appointment.organization, appointment=appointment, submitted_by=actor)
-    note.body = body.strip()
+        note = PreSupervisionNote(organization=appointment.organization, appointment=appointment, submitted_by=actor,
+                                  relationship=appointment.relationship)
+    _fill_prep(note, appointment.relationship, body=body, answers=answers)
     note.save()
+    return note
+
+
+def save_standalone_prep(relationship, actor, answers):
+    """Preparation started before an appointment exists; it attaches to the next appointment scheduled."""
+    note = PreSupervisionNote.objects.filter(relationship=relationship, appointment__isnull=True, submitted_by=actor,
+                                             record_status="active").first()
+    if note is None:
+        note = PreSupervisionNote(organization=relationship.organization, relationship=relationship, submitted_by=actor)
+    _fill_prep(note, relationship, answers=answers)
+    note.save()
+    return note
+
+
+def standalone_prep(relationship, actor):
+    return PreSupervisionNote.objects.filter(relationship=relationship, appointment__isnull=True, submitted_by=actor,
+                                             record_status="active").first()
+
+
+def attach_waiting_prep(appointment):
+    """When a session is scheduled, the supervisee's waiting preparation becomes this appointment's."""
+    rel = appointment.relationship
+    note = PreSupervisionNote.objects.filter(relationship=rel, appointment__isnull=True, submitted_by=rel.supervisee,
+                                             record_status="active").first()
+    if note is not None and not appointment.prep_notes.filter(submitted_by=rel.supervisee, record_status="active").exists():
+        note.appointment = appointment
+        note.save(update_fields=["appointment", "updated_at"])
     return note
 
 
@@ -146,6 +189,13 @@ def link_session(session, appointment):
         raise ValidationError("That appointment belongs to another relationship.")
     if appointment.status in (AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW):
         raise ValidationError("A cancelled or no-show appointment can't be documented.")
+    # One event, one session record: documenting the same appointment twice would double-count it
+    from apps.supervision.models import SupervisionSession
+    already = SupervisionSession.objects.filter(appointment=appointment, record_status="active").exclude(pk=session.pk).first()
+    if already is not None:
+        raise ValidationError(
+            "This appointment is already documented" + (" (a draft is in progress — finish that draft instead)." if already.status == "draft" else ".")
+        )
     session.appointment = appointment
     if appointment.status in OPEN:
         appointment.status = AppointmentStatus.COMPLETED
@@ -162,11 +212,17 @@ def _person(account):
 
 
 def serialize_prep_note(note):
+    from apps.supervision.prep_templates import TEMPLATES
+
     return None if note is None else {
         "id": str(note.id),
         "body": note.body,
+        "template_key": note.template_key,
+        "template_title": TEMPLATES.get(note.template_key, {}).get("title", ""),
+        "answers": note.answers or {},
         "submitted_by": _person(note.submitted_by),
-        "submitted_at": note.updated_at.isoformat(),
+        "submitted_at": (note.submitted_at or note.updated_at).isoformat(),
+        "appointment_id": str(note.appointment_id) if note.appointment_id else None,
     }
 
 
