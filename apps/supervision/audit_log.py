@@ -169,7 +169,7 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
             "trace": {
                 "service_hours_record": None if record is None else {
                     "id": str(record.id), "hours": float(record.hours), "entered_by": record.entered_by.full_name,
-                    "entered_at": record.created_at.isoformat(), "reviewed_by": record.reviewed_by.full_name if record.reviewed_by_id else None,
+                    "entered_at": record.created_at.isoformat(), "reviewed_by": ", ".join(r.reviewer.full_name for r in record.reviews.filter(record_status="active").select_related("reviewer")) or None,
                     "source_type": record.source_type,
                 },
                 "sessions": [

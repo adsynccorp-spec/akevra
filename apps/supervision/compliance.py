@@ -84,12 +84,16 @@ DEFAULT_RULES = {
     ],
     SupervisionTrack.SUPERVISED_FIELDWORK: [
         (date(2000, 1, 1), _FIELDWORK_2022),
-        # 2027: concentrated 7.5%, up to 160 hours a month, no contact count
+        # 2027: concentrated 7.5%, up to 160 hours a month, no contact count, and the client
+        # observation is a cumulative duration per month (60 min supervised, 90 min concentrated)
+        # instead of one observed contact (BACB 2027 transition guidance, updated 01/2026)
         (date(2027, 1, 1), {
-            **_FIELDWORK_2022,
+            **{k: v for k, v in _FIELDWORK_2022.items() if k != "min_observation_contacts"},
             "concentrated.min_supervision_percent": "7.5",
             "supervised.min_contacts": "0",
             "concentrated.min_contacts": "0",
+            "supervised.min_observation_minutes": "60",
+            "concentrated.min_observation_minutes": "90",
             "max_monthly_hours": "160",
         }),
     ],
@@ -136,6 +140,8 @@ def default_rules(track, on_date=None):
         return None
     # The 2000-01-01 entry is the standard in force before the 2027 BACB changes
     version = "BACB 2027 requirements" if start and start.year >= 2027 else "BACB current requirements"
+    if track == SupervisionTrack.SUPERVISED_FIELDWORK:
+        version = "BACB 2027 fieldwork standard" if start and start.year >= 2027 else "BACB 2022 fieldwork standard"
     return Rules(values, {"name": f"Default ({version})", "approved": False, "note": DEFAULTS_NOTE,
                           "effective_from": start.isoformat() if start and start.year > 2000 else None})
 
@@ -196,8 +202,11 @@ def _check(key, label, required, actual, met, status=None):
 # ---------------------------------------------------------------------------
 
 def evaluate_fieldwork_month(rules, fieldwork_type, *, total_hours, supervision_hours, group_hours,
-                             contacts, observation_contacts):
+                             contacts, observation_contacts, observation_minutes=None):
     """One month of verified fieldwork hours. `total_hours` includes the supervision hours.
+
+    The client observation is a number of observed contacts (2022 standard) or, where the rules
+    give `<type>.min_observation_minutes`, the cumulative observed minutes in the month (2027).
 
     When a requirement is missed, the month's eligible hours follow the BACB adjustment table:
     no observation or under the minimum -> none; over the maximum -> independent hours removed
@@ -210,7 +219,16 @@ def evaluate_fieldwork_month(rules, fieldwork_type, *, total_hours, supervision_
     prefix = f"{fieldwork_type}."
     required_percent = rules.number(prefix + "min_supervision_percent")
     min_contacts = int(rules.number(prefix + "min_contacts"))
-    min_observations = int(rules.number("min_observation_contacts"))
+    by_duration = rules.has(prefix + "min_observation_minutes")
+    if by_duration:
+        min_observation = int(rules.number(prefix + "min_observation_minutes"))
+        observed = int(observation_minutes or 0)
+        observation_check = _check("observation_minutes", "Observation with a client (minutes this month)",
+                                   min_observation, observed, observed >= min_observation)
+    else:
+        min_observation = int(rules.number("min_observation_contacts"))
+        observation_check = _check("observation_contacts", "Contacts with client observation", min_observation,
+                                   observation_contacts, observation_contacts >= min_observation)
     max_group_percent = rules.number("max_group_percent")
     min_hours = rules.number("min_monthly_hours")
     max_hours = rules.number("max_monthly_hours")
@@ -226,10 +244,7 @@ def evaluate_fieldwork_month(rules, fieldwork_type, *, total_hours, supervision_
             "supervision_percent", "Supervision percentage", _out(required_percent), _out(percent),
             percent is not None and percent >= required_percent,
         ),
-        _check(
-            "observation_contacts", "Contacts with client observation", min_observations,
-            observation_contacts, observation_contacts >= min_observations,
-        ),
+        observation_check,
         _check(
             "group_percent", "Group supervision (maximum share)", _out(max_group_percent),
             _out(group_percent), group_percent <= max_group_percent,
@@ -243,9 +258,8 @@ def evaluate_fieldwork_month(rules, fieldwork_type, *, total_hours, supervision_
     if not met:
         eligible, adjustments = _adjust_fieldwork_month(
             fieldwork_type, total=total, supervision=supervision, group=group, contacts=contacts,
-            observation_contacts=observation_contacts, required_percent=required_percent,
-            min_contacts=min_contacts, min_observations=min_observations,
-            max_group_percent=max_group_percent, min_hours=min_hours, max_hours=max_hours,
+            observation_check=observation_check, required_percent=required_percent,
+            min_contacts=min_contacts, max_group_percent=max_group_percent, min_hours=min_hours, max_hours=max_hours,
         )
     return {
         "model": "fieldwork_verified_hours",
@@ -266,12 +280,15 @@ def evaluate_fieldwork_month(rules, fieldwork_type, *, total_hours, supervision_
     }
 
 
-def _adjust_fieldwork_month(fieldwork_type, *, total, supervision, group, contacts, observation_contacts,
-                            required_percent, min_contacts, min_observations, max_group_percent,
-                            min_hours, max_hours):
+def _adjust_fieldwork_month(fieldwork_type, *, total, supervision, group, contacts, observation_check,
+                            required_percent, min_contacts, max_group_percent, min_hours, max_hours):
     """Eligible hours and the adjustments that produced them (BACB adjustment table, in order)."""
-    if observation_contacts < min_observations:
-        return ZERO, [{"rule": "observation", "detail": "No observation with a client: no hours are eligible for the month."}]
+    if not observation_check["met"]:
+        detail = ("No observation with a client: no hours are eligible for the month."
+                  if observation_check["key"] == "observation_contacts" else
+                  f"Observation with a client below {observation_check['required']} minutes "
+                  f"({observation_check['actual']} recorded): no hours are eligible for the month.")
+        return ZERO, [{"rule": "observation", "detail": detail}]
     if total < min_hours:
         return ZERO, [{"rule": "min_monthly_hours", "detail": f"Fewer than {_out(min_hours):g} hours: no hours are eligible for the month."}]
     if fieldwork_type == FieldworkSubtype.CONCENTRATED:
@@ -460,8 +477,10 @@ def _fieldwork_month_for(cycle, rules):
         group_hours=Sum("hours", filter=Q(supervision_format=SupervisionFormat.GROUP)),
         contact_count=Count("id"),
         observation_count=Count("id", filter=Q(client_observation=True)),
+        observed_minutes=Sum("observation_minutes", filter=Q(client_observation=True)),
+        unrecorded=Count("id", filter=Q(client_observation=True, observation_minutes__isnull=True)),
     )
-    return evaluate_fieldwork_month(
+    result = evaluate_fieldwork_month(
         rules,
         cycle.fieldwork_type or FieldworkSubtype.SUPERVISED,
         total_hours=totals["total_hours"],
@@ -469,7 +488,67 @@ def _fieldwork_month_for(cycle, rules):
         group_hours=supervision["group_hours"],
         contacts=supervision["contact_count"],
         observation_contacts=supervision["observation_count"],
+        observation_minutes=supervision["observed_minutes"],
     )
+    result["observation_contacts"] = supervision["observation_count"]
+    result["observation_minutes"] = supervision["observed_minutes"] or 0
+    # Observed contacts logged without a duration count as 0 minutes toward the 2027 duration rule
+    result["observations_without_duration"] = supervision["unrecorded"]
+    return result
+
+
+FIELDWORK_STANDARD_DATES = {"bacb_2022": date(2026, 12, 1), "bacb_2027": date(2027, 1, 1)}
+
+
+def fieldwork_standards(relationship):
+    """The BACB standard(s) a trainee's fieldwork is measured against. BACB applies one standard to
+    all fieldwork, by the date the application is submitted; until that is determined, both are
+    tracked (BACB transition guidance: plan to meet both sets of requirements)."""
+    chosen = getattr(relationship, "fieldwork_requirements", "both")
+    return [chosen] if chosen in FIELDWORK_STANDARD_DATES else ["bacb_2022", "bacb_2027"]
+
+
+def _fieldwork_rules(relationship, cycle):
+    return {standard: load_rules(SupervisionTrack.SUPERVISED_FIELDWORK, rules_date(relationship, cycle, standard),
+                                 relationship.organization_id)
+            for standard in fieldwork_standards(relationship)}
+
+
+_STANDARD_TAG = {"bacb_2022": "2022", "bacb_2027": "2027"}
+
+
+def _fieldwork_result(cycle, rules_by_standard):
+    """One month under the trainee's standard; with both tracked, the month counts only the hours
+    that qualify under both (the lower figure), and each standard's own result is attached."""
+    results = {standard: _fieldwork_month_for(cycle, rules) for standard, rules in rules_by_standard.items()}
+    if len(results) == 1:
+        standard, result = next(iter(results.items()))
+        return {**result, "standard": standard}, rules_by_standard[standard].source
+    low = min(results.values(), key=lambda r: r["_eligible"])
+    met = all(r["met"] for r in results.values())
+    checks, adjustments = [], []
+    for standard, result in results.items():
+        tag = _STANDARD_TAG[standard]
+        for check in result["checks"]:
+            checks.append({**check, "key": check["key"] if tag == "2022" else f"{check['key']}:{tag}", "base_key": check["key"],
+                           "standard": standard, "label": f"{check['label']} ({tag})"})
+        adjustments += [{**a, "standard": standard, "detail": f"{tag} standard: {a['detail']}"} for a in result["adjustments"]]
+    sources = [rules_by_standard[s].source for s in results]
+    source = {
+        **sources[-1],
+        "name": " + ".join(s["name"] for s in sources),
+        "approved": all(s.get("approved") for s in sources),
+        "parameters_by_standard": {s: dict(sorted(rules_by_standard[s].values.items())) for s in results},
+    }
+    return {
+        **low,
+        "status": "met" if met else "shortfall",
+        "met": met,
+        "checks": checks,
+        "adjustments": adjustments,
+        "standard": "both",
+        "by_standard": {s: {k: v for k, v in r.items() if k != "_eligible"} for s, r in results.items()},
+    }, source
 
 
 def _supervisee_sessions(relationship, **filters):
@@ -595,19 +674,15 @@ def _ongoing_month_for(cycle, rules):
     return result
 
 
-def rules_date(relationship, cycle):
-    """The date whose rules apply to this month. Fieldwork can be pinned to one BACB standard."""
+def rules_date(relationship, cycle, standard=None):
+    """The date whose rules apply to this month. Fieldwork follows the trainee's BACB standard (by
+    application date) for every month, whenever the hours were accrued."""
     day = date(cycle.year, cycle.month, 1)
-    pinned = getattr(relationship, "fieldwork_requirements", "by_month")
     if relationship.supervision_track == SupervisionTrack.SUPERVISED_FIELDWORK:
-        # A recorded application/eligibility year decides the standard when the month isn't pinned by hand
-        year = getattr(relationship, "fieldwork_application_year", None)
-        if pinned == "by_month" and year:
-            pinned = "bacb_2027" if year >= 2027 else "bacb_2022"
-        if pinned == "bacb_2022":
-            return min(day, date(2026, 12, 1))
-        if pinned == "bacb_2027":
-            return max(day, date(2027, 1, 1))
+        standard = standard or fieldwork_standards(relationship)[-1]
+        if standard == "bacb_2022":
+            return min(day, FIELDWORK_STANDARD_DATES["bacb_2022"])
+        return max(day, FIELDWORK_STANDARD_DATES["bacb_2027"])
     return day
 
 
@@ -625,13 +700,21 @@ def cycle_compliance(cycle, *, live=False):
     if not live and (stored := _snapshot_result(cycle)):
         return stored
     track = cycle.relationship.supervision_track
+    if track == SupervisionTrack.SUPERVISED_FIELDWORK:
+        rules_by_standard = _fieldwork_rules(cycle.relationship, cycle)
+        result, source = _fieldwork_result(cycle, rules_by_standard)
+        result.pop("_eligible")
+        by_standard = source.pop("parameters_by_standard", None)
+        if by_standard:
+            # Both standards tracked: every parameter, labelled with its standard
+            params = {f"{_STANDARD_TAG[s]} · {k}": v for s, values in by_standard.items() for k, v in values.items()}
+        else:
+            params = dict(sorted(rules_by_standard[result["standard"]].values.items()))
+        return {**result, "track": track, "rules": {**source, "parameters": params}}
     rules = load_rules(track, rules_date(cycle.relationship, cycle), cycle.organization_id)
     if rules is None:
         return _rules_pending(track)
-    if track == SupervisionTrack.SUPERVISED_FIELDWORK:
-        result = _fieldwork_month_for(cycle, rules)
-        result.pop("_eligible")
-    elif track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
+    if track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
         result = _ongoing_month_for(cycle, rules)
     else:
         return {"status": "not_compliance_bearing", "met": None, "track": track}
@@ -648,16 +731,17 @@ def relationship_compliance(relationship, cycles):
         eligible = []
         last_rules = None
         for cycle in cycles:
-            rules = load_rules(track, rules_date(relationship, cycle), relationship.organization_id)
-            last_rules = rules
+            rules_by_standard = _fieldwork_rules(relationship, cycle)
+            last_rules = rules_by_standard[fieldwork_standards(relationship)[-1]]
             stored = _snapshot_result(cycle)
             if stored:
-                result = {**stored, "_eligible": _dec(stored.get("eligible_hours"))}
+                result, source = {**stored, "_eligible": _dec(stored.get("eligible_hours"))}, stored.get("rules") or {}
             else:
-                result = _fieldwork_month_for(cycle, rules)
+                result, source = _fieldwork_result(cycle, rules_by_standard)
+                source.pop("parameters_by_standard", None)
             eligible.append((result["fieldwork_type"], result.pop("_eligible")))
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month,
-                           **result, "rules": rules.source})
+                           **result, "rules": source})
         rules = last_rules or default_rules(track)
         verified = HoursEntry.objects.filter(
             cycle__relationship=relationship, status=HoursStatus.VERIFIED, record_status="active"
@@ -686,6 +770,7 @@ def relationship_compliance(relationship, cycles):
             "verified_concentrated_hours": _out(verified_by_type[FieldworkSubtype.CONCENTRATED]),
             "not_counted_hours": _out(max(ZERO, verified_total - counted_total)),
             "by_month": breakdown,
+            "standards": fieldwork_standards(relationship),
         })
         return {"track": track, "months": months, "cumulative": cumulative}
 

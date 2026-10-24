@@ -50,12 +50,14 @@ class FieldworkSubtype(models.TextChoices):
 
 
 class FieldworkRequirements(models.TextChoices):
-    """Which BACB fieldwork standard a trainee's months are measured against. BACB applies the 2027
-    standard by application date, so a trainee applying before 2027 can be pinned to 2022."""
+    """Which BACB fieldwork standard a trainee's fieldwork is measured against. BACB: all supervised
+    fieldwork must meet the requirements in place when the certification application is submitted
+    (not when the hours were accrued). Until that is known, every month is checked against both
+    standards, as the BACB 2027 transition guidance recommends."""
 
-    BY_MONTH = "by_month", "By month (2022 rules before 2027, 2027 rules after)"
-    BACB_2022 = "bacb_2022", "BACB 2022 standard"
-    BACB_2027 = "bacb_2027", "BACB 2027 standard"
+    BOTH = "both", "Not yet determined: track both standards"
+    BACB_2022 = "bacb_2022", "BACB 2022 standard (application submitted before Jan 1, 2027)"
+    BACB_2027 = "bacb_2027", "BACB 2027 standard (application on or after Jan 1, 2027)"
 
 
 class SuperviseeAssignmentPurpose(models.TextChoices):
@@ -164,7 +166,7 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
     ended_on = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
     fieldwork_requirements = models.CharField(
-        max_length=16, choices=FieldworkRequirements.choices, default=FieldworkRequirements.BY_MONTH
+        max_length=16, choices=FieldworkRequirements.choices, default=FieldworkRequirements.BOTH
     )
     # BCaBA ongoing supervision: post-certification service hours delivered before this record began,
     # so the 5% -> 2% step after 1,000 hours is reached at the right time
@@ -180,6 +182,9 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
     fieldwork_standard_basis = models.CharField(max_length=32, blank=True, default="")
     fieldwork_application_year = models.PositiveSmallIntegerField(null=True, blank=True)
     fieldwork_standard_note = models.TextField(blank=True, default="")
+    # Who made the trainee-specific determination, and when (each change is also in the audit log)
+    fieldwork_standard_determined_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    fieldwork_standard_determined_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "supervisory_relationship"
@@ -638,6 +643,8 @@ class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
     activity_category = models.CharField(max_length=16, choices=ActivityCategory.choices, default=ActivityCategory.UNRESTRICTED)
     supervision_format = models.CharField(max_length=32, choices=SupervisionFormat.choices, blank=True, default="")
     client_observation = models.BooleanField(default=False)
+    # Minutes of this supervision contact spent observing the trainee with a client (BACB 2027 counts duration)
+    observation_minutes = models.PositiveIntegerField(null=True, blank=True)
     notes = models.TextField(blank=True, default="")
     logged_by = models.ForeignKey(
         "accounts.UserAccount",
@@ -684,6 +691,10 @@ class HoursEntry(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
                 raise ValidationError("Supervision hours must be individual or group.")
         elif self.supervision_format or self.client_observation:
             raise ValidationError("Format and client observation apply only to supervision hours.")
+        if not self.client_observation:
+            self.observation_minutes = None
+        elif self.observation_minutes is not None and self.hours is not None and self.observation_minutes > self.hours * 60:
+            raise ValidationError("Observation minutes can't be more than the supervision time logged.")
         self.verified = self.status == HoursStatus.VERIFIED
 
     def save(self, *args, **kwargs):
@@ -912,6 +923,25 @@ class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
         constraints = [
             models.UniqueConstraint(fields=["appointment", "submitted_by"], name="one_prep_note_per_person_per_appointment"),
         ]
+
+
+class PreSupervisionNoteRevision(UUIDPrimaryKeyModel, TimestampedModel, OrganizationScopedModel):
+    """Every submitted version of a preparation, oldest first: an edit adds a version and never
+    replaces the original submission."""
+
+    note = models.ForeignKey(PreSupervisionNote, on_delete=models.PROTECT, related_name="revisions")
+    version = models.PositiveIntegerField()
+    answers = models.JSONField(default=dict, blank=True)
+    body = models.TextField(blank=True, default="")
+    template_key = models.CharField(max_length=32, blank=True, default="")
+    submitted_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
+    # Which appointment the preparation was linked to when this version was saved (empty while waiting)
+    appointment = models.ForeignKey(Appointment, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+
+    class Meta:
+        db_table = "pre_supervision_note_revision"
+        ordering = ["version"]
+        constraints = [models.UniqueConstraint(fields=["note", "version"], name="one_prep_revision_per_version")]
 
 
 class AssessmentStatus(models.TextChoices):

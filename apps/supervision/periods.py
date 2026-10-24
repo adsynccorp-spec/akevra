@@ -26,6 +26,7 @@ from apps.supervision.models import (
     ServiceHoursReview,
     ServiceHoursSource,
     SupervisionTrack,
+    SupervisoryRelationship,
 )
 
 
@@ -190,6 +191,38 @@ def serialize_period(entry):
     }
 
 
+def review_status(record):
+    """Each supervisor responsible for this supervisee's month, with their own review or "pending".
+    The record is shared, but every supervisor acknowledges it separately."""
+    first = date(record.year, record.month, 1)
+    after = date(record.year + (record.month == 12), record.month % 12 + 1, 1)
+    relationships = (SupervisoryRelationship.objects
+                     .filter(supervisee_id=record.supervisee_id, supervision_track__in=SESSION_DERIVED_HOURS_TRACKS,
+                             started_on__lt=after)
+                     .exclude(ended_on__lt=first).exclude(status="archived").exclude(record_status="archived")
+                     .select_related("supervisor").order_by("started_on"))
+    reviews = {r.reviewer_id: r for r in record.reviews.filter(record_status="active").select_related("reviewer")}
+    rows, seen = [], set()
+    for rel in relationships:
+        if rel.supervisor_id in seen:
+            continue
+        seen.add(rel.supervisor_id)
+        review = reviews.get(rel.supervisor_id)
+        rows.append({
+            "supervisor": {"id": str(rel.supervisor_id), "name": rel.supervisor.full_name},
+            "relationship_id": str(rel.id),
+            "status": "reviewed" if review else "pending",
+            "reviewed_at": review.created_at.isoformat() if review else None,
+        })
+    # A review by someone no longer supervising this month still shows in the history
+    for reviewer_id, review in reviews.items():
+        if reviewer_id not in seen:
+            rows.append({"supervisor": {"id": str(reviewer_id), "name": review.reviewer.full_name},
+                         "relationship_id": str(review.relationship_id) if review.relationship_id else None,
+                         "status": "reviewed", "reviewed_at": review.created_at.isoformat()})
+    return rows
+
+
 def serialize_service_hours(record):
     if record is None:
         return None
@@ -218,6 +251,8 @@ def serialize_service_hours(record):
             {"reviewer": name(r.reviewer), "relationship_id": str(r.relationship_id) if r.relationship_id else None, "at": r.created_at.isoformat()}
             for r in record.reviews.filter(record_status="active").select_related("reviewer")
         ],
+        # Per supervisor: reviewed (by whom, when) or review pending
+        "review_status": review_status(record),
         "periods": [serialize_period(p) for p in record.period_entries.filter(record_status="active").select_related("entered_by")],
         "supersedes_id": str(record.supersedes_id) if record.supersedes_id else None,
         # Kept so the existing UI keeps working

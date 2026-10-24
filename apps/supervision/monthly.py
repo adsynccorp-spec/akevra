@@ -270,7 +270,8 @@ def complete_assignment(assignment, actor, *, comment=""):
 # Model 1 — Supervised Fieldwork: self-logged by the trainee, verified by the Supervisor
 # ---------------------------------------------------------------------------
 
-HOURS_FIELDS = ("occurred_on", "hours", "kind", "activity_category", "supervision_format", "client_observation", "notes")
+HOURS_FIELDS = ("occurred_on", "hours", "kind", "activity_category", "supervision_format", "client_observation",
+                "observation_minutes", "notes")
 
 
 def _require_track(relationship, tracks, message):
@@ -280,7 +281,7 @@ def _require_track(relationship, tracks, message):
 
 
 def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, supervision_format="",
-                        client_observation=False, notes="", activity_category="unrestricted"):
+                        client_observation=False, observation_minutes=None, notes="", activity_category="unrestricted"):
     _require_track(
         relationship,
         SELF_LOGGED_HOURS_TRACKS,
@@ -289,6 +290,9 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
     )
     if not occurred_on:
         raise ValidationError("The date worked is required.")
+    if client_observation and observation_minutes in (None, ""):
+        # BACB 2027 counts observation by duration, so new observations record their minutes
+        raise ValidationError("Enter how many minutes of this supervision were spent observing you with a client.")
     cycle = cycle_for_date(relationship, occurred_on)
     ensure_open(cycle, "hours")
     entry = HoursEntry(
@@ -301,6 +305,7 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
         activity_category=activity_category or "unrestricted",
         supervision_format=supervision_format or "",
         client_observation=bool(client_observation),
+        observation_minutes=observation_minutes if client_observation else None,
         notes=notes or "",
         logged_by=actor,
         status=HoursStatus.PENDING,
@@ -321,6 +326,8 @@ def correct_fieldwork_hours(entry, **changes):
     if entry.occurred_on and (entry.occurred_on.year, entry.occurred_on.month) != (entry.cycle.year, entry.cycle.month):
         entry.cycle = cycle_for_date(entry.cycle.relationship, entry.occurred_on)
         ensure_open(entry.cycle, "hours")
+    if entry.client_observation and entry.observation_minutes is None:
+        raise ValidationError("Enter how many minutes of this supervision were spent observing you with a client.")
     entry.status = HoursStatus.PENDING
     entry.return_reason = ""
     entry.attested_on = timezone.localdate()
@@ -569,6 +576,7 @@ def serialize_hours(entry):
         "activity_category": entry.activity_category,
         "supervision_format": entry.supervision_format,
         "client_observation": entry.client_observation,
+        "observation_minutes": entry.observation_minutes,
         "notes": entry.notes,
         "status": entry.status,
         "return_reason": entry.return_reason,

@@ -6,6 +6,7 @@ in-app notification still stands. Nothing here is compliance-bearing.
 
 import logging
 from datetime import timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.utils import timezone
@@ -49,9 +50,22 @@ def notify(recipient, kind, title, *, body="", relationship=None, tab=None, link
     return notification
 
 
+def _zone(organization):
+    try:
+        return ZoneInfo(getattr(organization, "time_zone", "") or "America/New_York")
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("America/New_York")
+
+
 def _when(appointment):
-    local = timezone.localtime(appointment.starts_at)
-    return local.strftime("%b %d, %Y at %I:%M %p").replace(" 0", " ")
+    """The session time in the organization's time zone, with the zone named so it is never read as UTC."""
+    local = timezone.localtime(appointment.starts_at, _zone(appointment.organization))
+    return local.strftime("%b %d, %Y at %I:%M %p %Z").replace(" 0", " ")
+
+
+def _linked_prep(appointment):
+    rel = appointment.relationship
+    return appointment.prep_notes.filter(submitted_by=rel.supervisee, record_status="active").first()
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +78,26 @@ def appointments_scheduled(appointments, actor):
     first = appointments[0]
     rel = first.relationship
     more = f" (+{len(appointments) - 1} more weekly)" if len(appointments) > 1 else ""
+    prep = _linked_prep(first)
+    if prep is not None:
+        # Preparation started earlier was attached to this session: no request to prepare again
+        submitted = timezone.localtime(prep.submitted_at or prep.updated_at, _zone(first.organization)).strftime("%b %d").replace(" 0", " ")
+        ask = (f"Your supervision preparation (submitted {submitted}) is already linked to this session. "
+               "You can review or update it from the Sessions tab before the session.")
+    else:
+        ask = "Please complete your supervision preparation before the session."
     notify(
         rel.supervisee, "appointment_scheduled", f"Supervision scheduled for {_when(first)}{more}",
-        body=(f"{actor.full_name} scheduled a supervision session for {_when(first)}{more}. "
-              "Please complete your supervision preparation before the session."),
+        body=f"{actor.full_name} scheduled a supervision session for {_when(first)}{more}. {ask}",
         relationship=rel, tab="sessions", appointment=first, email=True,
     )
+    if prep is not None:
+        # The supervisor learns the waiting preparation is now attached to the session
+        notify(
+            rel.supervisor, "preparation_submitted", f"{rel.supervisee.full_name}'s supervision preparation is linked",
+            body=f"Preparation submitted earlier is now linked to the session on {_when(first)} and is ready for review.",
+            relationship=rel, tab="sessions", appointment=first,
+        )
 
 
 def appointment_changed(appointment, actor, action):

@@ -21,6 +21,8 @@ PARAM_LABELS = {
     "min_contacts": "Minimum supervision contacts per month",
     "min_individual_contacts": "Minimum individual contacts per month",
     "min_observation_contacts": "Minimum contacts with client observation",
+    "supervised.min_observation_minutes": "Supervised fieldwork: minimum minutes observed with a client per month",
+    "concentrated.min_observation_minutes": "Concentrated fieldwork: minimum minutes observed with a client per month",
     "reduced_supervision_percent": "Reduced supervision % (after the hour threshold)",
     "reduced_after_service_hours": "Post-certification hours before the reduced %",
     "biweekly_min_minutes": "Minimum minutes in each half of the month (first 1,000 hours)",
@@ -42,6 +44,14 @@ TRACKS = [SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING, Supervis
 
 def _version_key(start):
     return "2027" if start.year >= 2027 else "current"
+
+
+def _version_label(track, start):
+    if track == SupervisionTrack.SUPERVISED_FIELDWORK:
+        # Fieldwork follows the trainee's application date, not the calendar month
+        return ("BACB 2027 fieldwork standard (applications on or after Jan 1, 2027)" if start.year >= 2027
+                else "BACB 2022 fieldwork standard (applications before Jan 1, 2027)")
+    return "BACB 2027 requirements" if start.year >= 2027 else "BACB current requirements"
 
 
 def _serialize_set(rule_set):
@@ -66,7 +76,7 @@ def catalog(organization):
             {
                 "key": _version_key(start),
                 "effective_from": start.isoformat() if start.year > 2000 else None,
-                "label": "BACB 2027 requirements" if start.year >= 2027 else "BACB current requirements",
+                "label": _version_label(track, start),
                 "parameters": [{"key": k, "label": PARAM_LABELS.get(k, k), "default": str(v)} for k, v in sorted(values.items())],
             }
             for start, values in DEFAULT_RULES.get(track, [])

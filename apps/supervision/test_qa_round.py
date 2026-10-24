@@ -189,12 +189,14 @@ class QaRoundTests(TestCase):
             organization=self.jordan.organization, supervisor=self.jordan, supervisee=self.casey,
             supervision_track=SupervisionTrack.SUPERVISED_FIELDWORK, fieldwork_subtype="supervised", started_on=date(2026, 9, 1),
         )
-        jordan.patch(f"/api/v1/relationships/{fw.id}", {"fieldwork_standard_basis": "application_year", "fieldwork_application_year": 2027,
-                                                       "fieldwork_standard_note": "Applying after Jan 1, 2027"}, format="json")
+        jordan.patch(f"/api/v1/relationships/{fw.id}", {"fieldwork_requirements": "bacb_2027", "fieldwork_standard_basis": "application_year",
+                                                       "fieldwork_application_year": 2027, "fieldwork_standard_note": "Applying after Jan 1, 2027"}, format="json")
         casey = self.as_user("casey@akevra.test")
         casey.post(f"/api/v1/relationships/{fw.id}/hours", {"occurred_on": "2026-10-02", "hours": "20", "kind": "independent"}, format="json")
         october = self.month(jordan, fw, 10)
-        self.assertIn("2027", october["rules"]["name"])  # pinned by the application year, not the calendar month
+        # The trainee's determined standard applies to an October 2026 month, not the calendar month's
+        self.assertIn("2027", october["rules"]["name"])
+        self.assertNotIn("2022", october["rules"]["name"])
 
         # An open month is not counted as "not met"
         alex = self.as_user("alex@akevra.test")

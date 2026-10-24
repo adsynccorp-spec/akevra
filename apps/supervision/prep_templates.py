@@ -25,7 +25,9 @@ TEMPLATES = {
                 {"key": "skills_to_practice", "label": "Which skills from the RBT Task List would you like to practice or be observed on?", "type": "textarea"},
                 {"key": "ethics_concerns", "label": "Any ethical, safety or professional concerns to raise?", "type": "select",
                  "options": ["No", "Yes — I'll describe below"]},
-                {"key": "ethics_details", "label": "If yes, describe the concern", "type": "textarea"},
+                # Shown, and then required, only when the concern question is answered Yes
+                {"key": "ethics_details", "label": "If yes, describe the concern", "type": "textarea", "required": True,
+                 "show_if": {"key": "ethics_concerns", "equals": "Yes — I'll describe below"}},
             ]},
             {"title": "For this session", "questions": COMMON_CLOSING},
         ],
@@ -96,13 +98,21 @@ def questions(template):
     return [q for section in template["sections"] for q in section["questions"]]
 
 
+def is_shown(question, answers):
+    """A conditional question applies only when the answer it depends on matches."""
+    condition = question.get("show_if")
+    return not condition or (answers or {}).get(condition["key"]) == condition["equals"]
+
+
 def validate_answers(template, answers):
-    """Required questions must be answered; unknown keys are dropped. Returns the cleaned answers."""
+    """Required questions must be answered; unknown keys and answers to hidden conditional questions
+    are dropped. Returns the cleaned answers."""
     from django.core.exceptions import ValidationError
 
     known = {q["key"]: q for q in questions(template)}
     cleaned = {k: (str(v).strip() if v is not None else "") for k, v in (answers or {}).items() if k in known}
-    missing = [known[k]["label"] for k, q in known.items() if q.get("required") and not cleaned.get(k)]
+    cleaned = {k: v for k, v in cleaned.items() if is_shown(known[k], cleaned)}
+    missing = [q["label"] for k, q in known.items() if q.get("required") and is_shown(q, cleaned) and not cleaned.get(k)]
     if missing:
         raise ValidationError("Please answer: " + "; ".join(missing))
     return cleaned

@@ -1,4 +1,5 @@
 from datetime import date
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.core.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema
@@ -57,7 +58,8 @@ class OrganizationSettingsView(APIView):
 
     def _payload(self, request):
         org = request.user_account.organization
-        return {"name": org.name, "require_external_reporting": org.require_external_reporting, "can_edit": _is_admin(request)}
+        return {"name": org.name, "require_external_reporting": org.require_external_reporting, "time_zone": org.time_zone,
+                "can_edit": _is_admin(request)}
 
     @extend_schema(tags=["Settings"], summary="Organization settings", operation_id="organization_settings", responses=JSON_RESPONSE)
     def get(self, request):
@@ -74,4 +76,15 @@ class OrganizationSettingsView(APIView):
             org.save(update_fields=["require_external_reporting", "updated_at"])
             write_audit(action="organization.settings", entity_type="organization", entity_id=org.id, request=request,
                         before={"require_external_reporting": before}, after={"require_external_reporting": org.require_external_reporting})
+        if "time_zone" in request.data:
+            zone = str(request.data["time_zone"] or "").strip()
+            try:
+                ZoneInfo(zone)
+            except (ZoneInfoNotFoundError, ValueError):
+                return Response({"detail": "Choose a valid time zone (for example America/New_York)."}, status=status.HTTP_400_BAD_REQUEST)
+            before = org.time_zone
+            org.time_zone = zone
+            org.save(update_fields=["time_zone", "updated_at"])
+            write_audit(action="organization.settings", entity_type="organization", entity_id=org.id, request=request,
+                        before={"time_zone": before}, after={"time_zone": zone})
         return Response(self._payload(request))

@@ -37,7 +37,7 @@ class RelationshipCreateSerializer(serializers.Serializer):
 
 class RelationshipPatchSerializer(serializers.Serializer):
     supervision_track = serializers.CharField(required=False)
-    fieldwork_requirements = serializers.ChoiceField(choices=["by_month", "bacb_2022", "bacb_2027"], required=False, help_text="Supervised Fieldwork: which BACB standard months are measured against")
+    fieldwork_requirements = serializers.ChoiceField(choices=["both", "bacb_2022", "bacb_2027"], required=False, help_text="Supervised Fieldwork: the BACB standard the trainee applies under (by application date), or both while undetermined")
     prior_service_hours = serializers.DecimalField(max_digits=8, decimal_places=2, required=False, min_value=0, help_text="BCaBA: post-certification service hours before this record began")
     fieldwork_subtype = serializers.CharField(required=False, allow_blank=True)
     supervisee_purpose = serializers.CharField(required=False, allow_blank=True)
@@ -187,6 +187,7 @@ class HoursCreateSerializer(serializers.Serializer):
     activity_category = serializers.ChoiceField(choices=["unrestricted", "restricted"], required=False, default="unrestricted", help_text="BACB: at least 60% of all fieldwork hours must be unrestricted")
     supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
     client_observation = serializers.BooleanField(required=False, default=False)
+    observation_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=1440, help_text="Minutes observed with a client (required with client_observation; BACB 2027 counts duration)")
     notes = serializers.CharField(required=False, allow_blank=True)
 
 
@@ -197,6 +198,7 @@ class HoursPatchSerializer(serializers.Serializer):
     activity_category = serializers.ChoiceField(choices=["unrestricted", "restricted"], required=False)
     supervision_format = serializers.ChoiceField(choices=["individual", "group"], required=False, allow_blank=True)
     client_observation = serializers.BooleanField(required=False)
+    observation_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=1440)
     notes = serializers.CharField(required=False, allow_blank=True)
 
 

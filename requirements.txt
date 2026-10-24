@@ -8,4 +8,5 @@ cryptography>=44.0
 drf-spectacular>=0.28
 gunicorn>=23.0
 whitenoise>=6.9
+tzdata>=2024.1
 

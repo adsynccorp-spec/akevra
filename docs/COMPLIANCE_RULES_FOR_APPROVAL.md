@@ -10,7 +10,13 @@ All values below come from the BACB handbooks (BCBA, BCaBA and RBT Handbooks, up
 - **Months that miss a requirement:** BACB adjustment table: no client observation or under 20 h → no hours; over the maximum → independent hours removed to the maximum; supervision % short → independent hours removed until met; contacts short → hours prorated by contacts held; group above individual → group hours reduced. Concentrated months are never adjusted (no hours if any requirement is missed).
 - **Mixed supervised / concentrated fieldwork:** Concentrated hours × 1.33 plus supervised hours must reach 2,000. With one type only, its own total applies (2,000 supervised or 1,500 concentrated).
 - **Month with 0 service hours (RBT / BCaBA):** No supervision is required that month; it is treated as compliant (BCaBA Handbook: exempt when no services are delivered).
-- **2027 BACB changes:** RBT and BCaBA ongoing supervision use the 2027 rules for months from January 2027. Supervised Fieldwork defaults to the same by-month switch, and each relationship can be pinned to the 2022 or 2027 standard, because BACB applies the fieldwork standard by application date.
+- **2027 BACB changes:** RBT and BCaBA ongoing supervision use the 2027 rules for months from January 2027.
+- **Which fieldwork standard applies (Supervised Fieldwork):** BACB: "All supervised fieldwork must meet the requirements in place at the time you submit your certification application" (*Guidance for Meeting the BCBA Requirements During the 2027 Transition*, updated 01/2026). So the standard is **not** switched by calendar month. Each trainee has a recorded determination — Standard, Application/Eligibility Year, Basis and Note, with who decided and when (every change is in the audit log):
+  - **BACB 2022 standard** — application submitted before Jan 1, 2027. All months are measured against the 2022 rules.
+  - **BACB 2027 standard** — application on or after Jan 1, 2027. All months, including those accrued in 2025–2026, are measured against the 2027 rules.
+  - **Not yet determined (default)** — every month is checked against both standards, as BACB recommends; a month counts only the hours that qualify under both, and each standard's own result is shown.
+  A determination needs a basis, must agree with the application year (2022 → before 2027; 2027 → 2027 or later), and a "supervisor decision" needs a note.
+- **2027 fieldwork observation:** measured by duration, not contacts — at least **60 cumulative minutes** of observation with a client per month for Supervised Fieldwork and **90 minutes** for Concentrated (any number of observations; e.g. four 15-minute observations meet the supervised requirement). The 2022 rule stays one observed contact per month. Trainees record the observed minutes on each observed supervision entry; an older entry with no recorded duration counts as 0 minutes toward the 2027 rule and is flagged. Missing the observation requirement means no hours are eligible for that month, under either standard.
 - **BCaBA 1,000-hour step (5% → 2%):** Counts attested service hours in the system plus a per-relationship 'prior post-certification hours' figure the Supervisor enters.
 - **60% unrestricted activities (fieldwork):** Each fieldwork entry is marked restricted or unrestricted; the cumulative record shows the unrestricted share and fieldwork is not complete until it reaches 60%.
 - **Qualifying supervision:** Only completed, real-time sessions (in person or live video) count. Drafts, phone calls, asynchronous reviews and appointments never count.
@@ -27,8 +33,8 @@ All values below come from the BACB handbooks (BCBA, BCaBA and RBT Handbooks, up
 
 | From | Parameters |
 |---|---|
-| Current | supervised.min_supervision_percent = 5; supervised.min_contacts = 4; supervised.total_required_hours = 2000; concentrated.min_supervision_percent = 10; concentrated.min_contacts = 6; concentrated.total_required_hours = 1500; concentrated_multiplier = 1.33; min_observation_contacts = 1; max_group_percent = 50; min_monthly_hours = 20; max_monthly_hours = 130; min_unrestricted_percent = 60 |
-| 2027-01-01 | supervised.min_supervision_percent = 5; supervised.min_contacts = 0; supervised.total_required_hours = 2000; concentrated.min_supervision_percent = 7.5; concentrated.min_contacts = 0; concentrated.total_required_hours = 1500; concentrated_multiplier = 1.33; min_observation_contacts = 1; max_group_percent = 50; min_monthly_hours = 20; max_monthly_hours = 160; min_unrestricted_percent = 60 |
+| 2022 standard (by application date) | supervised.min_supervision_percent = 5; supervised.min_contacts = 4; supervised.total_required_hours = 2000; concentrated.min_supervision_percent = 10; concentrated.min_contacts = 6; concentrated.total_required_hours = 1500; concentrated_multiplier = 1.33; min_observation_contacts = 1; max_group_percent = 50; min_monthly_hours = 20; max_monthly_hours = 130; min_unrestricted_percent = 60 |
+| 2027 standard (by application date) | supervised.min_supervision_percent = 5; supervised.min_contacts = 0; supervised.min_observation_minutes = 60; supervised.total_required_hours = 2000; concentrated.min_supervision_percent = 7.5; concentrated.min_contacts = 0; concentrated.min_observation_minutes = 90; concentrated.total_required_hours = 1500; concentrated_multiplier = 1.33; max_group_percent = 50; min_monthly_hours = 20; max_monthly_hours = 160; min_unrestricted_percent = 60 |
 
 ### Bcaba Ongoing Supervision
 
@@ -52,6 +58,8 @@ All values below come from the BACB handbooks (BCBA, BCaBA and RBT Handbooks, up
 
 ## 4. Supervised Fieldwork — monthly cases
 
+Observation = observed contacts under the 2022 rules; observed minutes under the 2027 rules.
+
 | Case | Rules | Type | Total h | Supervision h | Group h | Contacts | Observation | Expected |
 |---|---|---|---|---|---|---|---|---|
 | F1 supervised 5% | 2026 | supervised | 100 | 5 | 2 | 4 | 1 | status = met; supervision_percent = 5.0; eligible_hours = 100.0 |
@@ -65,8 +73,11 @@ All values below come from the BACB handbooks (BCBA, BCaBA and RBT Handbooks, up
 | F9 group exactly 50% | 2026 | supervised | 100 | 5 | 2.5 | 4 | 1 | status = met; eligible_hours = 100.0 |
 | F10 no observation | 2026 | supervised | 100 | 5 | 0 | 4 | 0 | status = shortfall; eligible_hours = 0.0 |
 | F11 BACB example: 2 of 4 contacts | 2026 | supervised | 110 | 5.5 | 0 | 2 | 1 | status = shortfall; eligible_hours = 55.0 |
-| F12 2027 concentrated 7.5% | 2027 | concentrated | 100 | 7.5 | 0 | 0 | 1 | status = met; eligible_hours = 100.0 |
-| F13 2027 up to 160 h | 2027 | supervised | 150 | 7.5 | 0 | 0 | 1 | status = met; eligible_hours = 150.0 |
+| F12 2027 concentrated 7.5% | 2027 | concentrated | 100 | 7.5 | 0 | 0 | 90 min | status = met; eligible_hours = 100.0 |
+| F13 2027 up to 160 h | 2027 | supervised | 150 | 7.5 | 0 | 0 | 60 min | status = met; eligible_hours = 150.0 |
+| F14 2027 supervised: 45 of 60 observed minutes | 2027 | supervised | 100 | 5 | 0 | 0 | 45 min | status = shortfall; eligible_hours = 0.0 |
+| F15 2027 supervised: four 15-minute observations | 2027 | supervised | 100 | 5 | 0 | 0 | 60 min | status = met; eligible_hours = 100.0 |
+| F16 2027 concentrated: 60 of 90 observed minutes | 2027 | concentrated | 100 | 7.5 | 0 | 0 | 60 min | status = shortfall; eligible_hours = 0.0 |
 
 ## 5. Supervised Fieldwork — cumulative (incl. mixed)
 
@@ -103,7 +114,7 @@ All values below come from the BACB handbooks (BCBA, BCaBA and RBT Handbooks, up
 
 ## 8. Approval
 
-39 test cases above run automatically on every build (`apps/supervision/test_monthly_work.py`).
+42 test cases above run automatically on every build (`apps/supervision/test_monthly_work.py`).
 
 Approved by (AKEVRA): ______________________   Date: ____________
 

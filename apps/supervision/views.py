@@ -34,6 +34,7 @@ from apps.supervision.models import (
     Assignment,
     DevelopmentPlan,
     DevelopmentPlanMilestone,
+    FieldworkRequirements,
     HoursEntry,
     SupervisionSession,
     SuperviseeAssignmentPurpose,
@@ -115,6 +116,8 @@ def serialize_relationship(rel, viewer=None):
         "fieldwork_standard_basis": rel.fieldwork_standard_basis,
         "fieldwork_application_year": rel.fieldwork_application_year,
         "fieldwork_standard_note": rel.fieldwork_standard_note,
+        "fieldwork_standard_determined_by": rel.fieldwork_standard_determined_by.full_name if rel.fieldwork_standard_determined_by_id else None,
+        "fieldwork_standard_determined_at": rel.fieldwork_standard_determined_at.isoformat() if rel.fieldwork_standard_determined_at else None,
         "prior_service_hours": float(rel.prior_service_hours),
         "prior_service_hours_detail": {
             "hours": float(rel.prior_service_hours),
@@ -162,7 +165,7 @@ def visible_relationships(user_account):
     organization for a Clinical Director. RLS already limits rows to the workspace."""
     from apps.rbac.models import OrgRole
 
-    qs = SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by")
+    qs = SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by", "fieldwork_standard_determined_by")
     if OrgRole.CLINICAL_DIRECTOR in org_roles_for(user_account):
         return qs
     return qs.filter(Q(supervisor=user_account) | Q(supervisee=user_account))
@@ -170,7 +173,7 @@ def visible_relationships(user_account):
 
 def _get_relationship(pk):
     return (
-        SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by")
+        SupervisoryRelationship.objects.select_related("supervisor", "supervisee", "prior_service_hours_entered_by", "prior_service_hours_reviewed_by", "fieldwork_standard_determined_by")
         .filter(pk=pk)
         .first()
     )
@@ -283,6 +286,25 @@ class RelationshipListView(APIView):
         return Response(serialize_relationship(rel, request.user_account), status=status.HTTP_201_CREATED)
 
 
+def _standard_problem(rel):
+    """A fieldwork standard is a determination about this trainee's application, so it must agree
+    with the recorded application/eligibility year and say why it applies."""
+    chosen, year = rel.fieldwork_requirements, rel.fieldwork_application_year
+    if year is not None and not 2000 <= year <= 2100:
+        return "The application/eligibility year must be a year like 2027."
+    if chosen == "both":
+        return None
+    if not rel.fieldwork_standard_basis:
+        return "Choose the basis for applying this standard."
+    if chosen == "bacb_2022" and year is not None and year >= 2027:
+        return "The 2022 standard applies only to applications submitted before January 1, 2027. Change the year or the standard."
+    if chosen == "bacb_2027" and year is not None and year < 2027:
+        return "The 2027 standard applies to applications submitted on or after January 1, 2027. Change the year or the standard."
+    if rel.fieldwork_standard_basis == "supervisor_decision" and not rel.fieldwork_standard_note.strip():
+        return "Add a note explaining the decision."
+    return None
+
+
 class RelationshipDetailView(APIView):
     permission_classes = [HasWorkspace]
 
@@ -321,8 +343,12 @@ class RelationshipDetailView(APIView):
         for field in ("supervision_track", "fieldwork_subtype", "supervisee_purpose", "status", "ended_on"):
             if field in request.data:
                 setattr(rel, field, request.data[field] or "")
+        standard_before = (rel.fieldwork_requirements, rel.fieldwork_standard_basis, rel.fieldwork_application_year, rel.fieldwork_standard_note)
         if "fieldwork_requirements" in request.data:
-            rel.fieldwork_requirements = request.data["fieldwork_requirements"] or "by_month"
+            chosen = request.data["fieldwork_requirements"] or "both"
+            if chosen not in FieldworkRequirements.values:
+                return Response({"detail": "Choose the BACB 2022 standard, the 2027 standard, or track both."}, status=status.HTTP_400_BAD_REQUEST)
+            rel.fieldwork_requirements = chosen
         prior_changed = False
         if "prior_service_hours" in request.data:
             try:
@@ -358,6 +384,14 @@ class RelationshipDetailView(APIView):
                 rel.fieldwork_application_year = int(raw) if raw not in (None, "") else None
             except (TypeError, ValueError):
                 return Response({"detail": "The application/eligibility year must be a year like 2027."}, status=status.HTTP_400_BAD_REQUEST)
+        standard_after = (rel.fieldwork_requirements, rel.fieldwork_standard_basis, rel.fieldwork_application_year, rel.fieldwork_standard_note)
+        if standard_after != standard_before:
+            problem = _standard_problem(rel)
+            if problem:
+                return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
+            # A trainee-specific determination: who made it and when (before/after are in the audit entry)
+            rel.fieldwork_standard_determined_by = request.user_account
+            rel.fieldwork_standard_determined_at = timezone.now()
         try:
             rel.save()
         except ValidationError as exc:

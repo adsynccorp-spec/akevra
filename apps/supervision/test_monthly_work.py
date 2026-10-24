@@ -47,6 +47,10 @@ class MonthlyWorkAcceptanceTests(TestCase):
             supervision_track=SupervisionTrack.SUPERVISED_FIELDWORK,
             fieldwork_subtype="supervised",
             started_on=date(2026, 6, 1),
+            # These acceptance scenarios exercise the 2022 rules; the 2027 and track-both logic
+            # is covered in test_qa_round2
+            fieldwork_requirements="bacb_2022",
+            fieldwork_standard_basis="application_year",
         )
 
     @classmethod
@@ -65,6 +69,8 @@ class MonthlyWorkAcceptanceTests(TestCase):
         return SimpleUploadedFile(name, body, content_type="application/pdf")
 
     def log_hours(self, client, day, hours, kind="independent", **extra):
+        if extra.get("client_observation") and "observation_minutes" not in extra:
+            extra["observation_minutes"] = int(min(60, float(hours) * 60))
         response = client.post(
             f"/api/v1/relationships/{self.fieldwork.id}/hours",
             {"occurred_on": day, "hours": hours, "kind": kind, **extra},
@@ -602,6 +608,7 @@ RBT_CASES = [
 
 FIELDWORK_MONTH_CASES = [
     # id, rules date, type, total, supervision, group, contacts, observation, expected
+    # observation = observed contacts under the 2022 rules, observed minutes under the 2027 rules
     ("F1 supervised 5%", D2026, "supervised", 100, 5, 2, 4, 1, {"status": "met", "supervision_percent": 5.0, "eligible_hours": 100.0}),
     ("F2 supervised 4.99%: independent trimmed", D2026, "supervised", 100, "4.99", 0, 4, 1, {"status": "shortfall", "eligible_hours": 99.8}),
     ("F3 concentrated 10%", D2026, "concentrated", 100, 10, 0, 6, 1, {"status": "met", "eligible_hours": 100.0}),
@@ -613,8 +620,11 @@ FIELDWORK_MONTH_CASES = [
     ("F9 group exactly 50%", D2026, "supervised", 100, 5, "2.5", 4, 1, {"status": "met", "eligible_hours": 100.0}),
     ("F10 no observation", D2026, "supervised", 100, 5, 0, 4, 0, {"status": "shortfall", "eligible_hours": 0.0}),
     ("F11 BACB example: 2 of 4 contacts", D2026, "supervised", 110, "5.5", 0, 2, 1, {"status": "shortfall", "eligible_hours": 55.0}),
-    ("F12 2027 concentrated 7.5%", D2027, "concentrated", 100, "7.5", 0, 0, 1, {"status": "met", "eligible_hours": 100.0}),
-    ("F13 2027 up to 160 h", D2027, "supervised", 150, "7.5", 0, 0, 1, {"status": "met", "eligible_hours": 150.0}),
+    ("F12 2027 concentrated 7.5%", D2027, "concentrated", 100, "7.5", 0, 0, 90, {"status": "met", "eligible_hours": 100.0}),
+    ("F13 2027 up to 160 h", D2027, "supervised", 150, "7.5", 0, 0, 60, {"status": "met", "eligible_hours": 150.0}),
+    ("F14 2027 supervised: 45 of 60 observed minutes", D2027, "supervised", 100, 5, 0, 0, 45, {"status": "shortfall", "eligible_hours": 0.0}),
+    ("F15 2027 supervised: four 15-minute observations total 60", D2027, "supervised", 100, 5, 0, 0, 60, {"status": "met", "eligible_hours": 100.0}),
+    ("F16 2027 concentrated: 60 of 90 observed minutes", D2027, "concentrated", 100, "7.5", 0, 0, 60, {"status": "shortfall", "eligible_hours": 0.0}),
 ]
 
 CUMULATIVE_CASES = [
@@ -673,7 +683,7 @@ class CalculationCaseTests(SimpleTestCase):
                 rules = default_rules(SupervisionTrack.SUPERVISED_FIELDWORK, on)
                 result = evaluate_fieldwork_month(
                     rules, kind, total_hours=total, supervision_hours=supervision, group_hours=group,
-                    contacts=contacts, observation_contacts=observation,
+                    contacts=contacts, observation_contacts=observation, observation_minutes=observation,
                 )
                 self.assertSubset(expected, result, case_id)
 

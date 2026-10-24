@@ -16,6 +16,7 @@ from apps.supervision.models import (
     AppointmentEvent,
     AppointmentStatus,
     PreSupervisionNote,
+    PreSupervisionNoteRevision,
 )
 
 MAX_BATCH = 26  # half a year of weekly appointments
@@ -141,17 +142,31 @@ def _fill_prep(note, relationship, *, body="", answers=None):
     note.submitted_at = timezone.now()
 
 
+def _keep_version(note, actor):
+    """Every submission is kept: an edit adds the next version and never replaces the original."""
+    last = note.revisions.order_by("-version").first()
+    if last is not None and last.answers == (note.answers or {}) and last.body == note.body:
+        return last  # nothing changed
+    return PreSupervisionNoteRevision.objects.create(
+        organization=note.organization, note=note, version=(last.version + 1) if last else 1,
+        answers=note.answers or {}, body=note.body, template_key=note.template_key, submitted_by=actor,
+        appointment=note.appointment,
+    )
+
+
 def save_prep_note(appointment, actor, body="", answers=None):
     """The Supervisee's preparation (the structured Supervision Preparation Form, or free text);
-    one per appointment, editable until the appointment is closed."""
+    one per appointment, editable until the appointment is closed. Each save is kept as a version."""
     if appointment.status not in OPEN:
         raise ValidationError("Preparation notes can only be added to an upcoming appointment.")
     note = PreSupervisionNote.objects.filter(appointment=appointment, submitted_by=actor, record_status="active").first()
     if note is None:
         note = PreSupervisionNote(organization=appointment.organization, appointment=appointment, submitted_by=actor,
                                   relationship=appointment.relationship)
-    _fill_prep(note, appointment.relationship, body=body, answers=answers)
-    note.save()
+    with transaction.atomic():
+        _fill_prep(note, appointment.relationship, body=body, answers=answers)
+        note.save()
+        _keep_version(note, actor)
     return note
 
 
@@ -161,14 +176,23 @@ def save_standalone_prep(relationship, actor, answers):
                                              record_status="active").first()
     if note is None:
         note = PreSupervisionNote(organization=relationship.organization, relationship=relationship, submitted_by=actor)
-    _fill_prep(note, relationship, answers=answers)
-    note.save()
+    with transaction.atomic():
+        _fill_prep(note, relationship, answers=answers)
+        note.save()
+        _keep_version(note, actor)
     return note
 
 
 def standalone_prep(relationship, actor):
     return PreSupervisionNote.objects.filter(relationship=relationship, appointment__isnull=True, submitted_by=actor,
                                              record_status="active").first()
+
+
+def linked_preps(relationship, actor):
+    """The supervisee's preparations already attached to upcoming sessions, soonest first."""
+    return (PreSupervisionNote.objects.filter(relationship=relationship, submitted_by=actor, record_status="active",
+                                              appointment__status__in=OPEN, appointment__record_status="active")
+            .select_related("appointment", "submitted_by").order_by("appointment__starts_at"))
 
 
 def attach_waiting_prep(appointment):
@@ -223,6 +247,12 @@ def serialize_prep_note(note):
         "submitted_by": _person(note.submitted_by),
         "submitted_at": (note.submitted_at or note.updated_at).isoformat(),
         "appointment_id": str(note.appointment_id) if note.appointment_id else None,
+        # The original submission and every later edit, oldest first
+        "revisions": [
+            {"version": r.version, "answers": r.answers or {}, "body": r.body, "submitted_by": _person(r.submitted_by),
+             "submitted_at": r.created_at.isoformat(), "linked": r.appointment_id is not None}
+            for r in note.revisions.select_related("submitted_by").order_by("version")
+        ],
     }
 
 

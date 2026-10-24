@@ -241,7 +241,8 @@ class PrepNoteView(APIView):
                                              answers=serializer.validated_data.get("answers"))
         except ValidationError as exc:
             return _bad_request(exc)
-        write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request)
+        write_audit(action="prep_note.save" if first else "prep_note.edit", entity_type="pre_supervision_note", entity_id=note.id,
+                    request=request, metadata={"version": note.revisions.count()})
         if first:
             notifications.preparation_submitted(appointment, request.user_account)
         return Response(scheduling.serialize_prep_note(note))
@@ -261,8 +262,13 @@ class PreparationTemplateView(APIView):
             return denied
         key, template = template_for(rel.supervision_track)
         waiting = scheduling.standalone_prep(rel, request.user_account)
+        linked = [
+            {"appointment_id": str(note.appointment_id), "starts_at": note.appointment.starts_at.isoformat(),
+             "ends_at": note.appointment.ends_at.isoformat(), "note": scheduling.serialize_prep_note(note)}
+            for note in scheduling.linked_preps(rel, request.user_account)
+        ]
         return Response({"key": key, **template, "can_prepare": has_permission(request.user_account, "prep.submit", relationship=rel),
-                         "waiting": scheduling.serialize_prep_note(waiting)})
+                         "waiting": scheduling.serialize_prep_note(waiting), "linked": linked})
 
     @extend_schema(tags=["Scheduling"], summary="Start preparation before an appointment is scheduled (Supervisee)", request=PrepNoteSerializer, operation_id="prep_standalone_save", responses=JSON_RESPONSE)
     def put(self, request, pk):
@@ -278,5 +284,6 @@ class PreparationTemplateView(APIView):
             note = scheduling.save_standalone_prep(rel, request.user_account, serializer.validated_data.get("answers") or {})
         except ValidationError as exc:
             return _bad_request(exc)
-        write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request, metadata={"standalone": True})
+        write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request,
+                    metadata={"standalone": True, "version": note.revisions.count()})
         return Response(scheduling.serialize_prep_note(note))
