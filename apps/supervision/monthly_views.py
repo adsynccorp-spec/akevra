@@ -525,6 +525,27 @@ class HoursVerifyView(APIView):
         return Response(monthly.serialize_hours(entry))
 
 
+class HoursObservationMinutesView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Hours"], summary="Record the observation duration on an observed entry (Supervisor)", request=None,
+                   operation_id="hours_observation_minutes", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        entry = _hours_queryset().filter(pk=pk).first()
+        if entry is None:
+            return _not_found()
+        if denied := _denied(request, "hours.verify", entry.cycle.relationship, "hours_entry", entry.id):
+            return denied
+        before = entry.observation_minutes
+        try:
+            monthly.record_observation_minutes(entry, request.user_account, request.data.get("observation_minutes"))
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="hours.observation_minutes", entity_type="hours_entry", entity_id=entry.id, request=request,
+                    before={"observation_minutes": before}, after={"observation_minutes": entry.observation_minutes})
+        return Response(monthly.serialize_hours(entry))
+
+
 class HoursReturnView(APIView):
     permission_classes = [HasWorkspace]
 

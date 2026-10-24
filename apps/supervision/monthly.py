@@ -346,6 +346,24 @@ def verify_fieldwork_hours(entry, actor):
     return entry
 
 
+def record_observation_minutes(entry, actor, minutes):
+    """The Supervisor records how long an observation lasted on an entry logged before durations
+    were captured (BACB 2027 counts observation by duration). Only the duration changes: the hours,
+    status and verification stay as they are, and the change is audited."""
+    if not entry.client_observation:
+        raise ValidationError("This entry has no client observation.")
+    ensure_open(entry.cycle, "hours")
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        raise ValidationError("Enter the observation length in whole minutes.") from None
+    if minutes < 1:
+        raise ValidationError("Enter the observation length in whole minutes.")
+    entry.observation_minutes = minutes
+    entry.save()
+    return entry
+
+
 def return_fieldwork_hours(entry, actor, *, reason):
     if entry.status != HoursStatus.PENDING:
         raise ValidationError("Only hours waiting for review can be returned.")

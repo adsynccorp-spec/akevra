@@ -95,4 +95,5 @@ urlpatterns = [
     path("hours/<uuid:pk>", mv.HoursDetailView.as_view(), name="hours-detail"),
     path("hours/<uuid:pk>/verify", mv.HoursVerifyView.as_view(), name="hours-verify"),
     path("hours/<uuid:pk>/return", mv.HoursReturnView.as_view(), name="hours-return"),
+    path("hours/<uuid:pk>/observation-minutes", mv.HoursObservationMinutesView.as_view(), name="hours-observation-minutes"),
 ]

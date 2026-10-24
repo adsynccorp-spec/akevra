@@ -212,3 +212,13 @@ class QaRound2Tests(TestCase):
         self.assertEqual((month["standard"], month["status"], month["eligible_hours"]), ("bacb_2027", "shortfall", 0.0))
         self.assertIn("below 60 minutes", month["adjustments"][0]["detail"])
         self.assertNotIn("observation_contacts", {c["key"] for c in month["checks"]})
+
+        # The supervisor can record the real duration on the verified observed entry; only that changes
+        observed_entry = next(e for e in casey.get(f"/api/v1/relationships/{fw.id}/hours").data["entries"] if e["client_observation"])
+        url = f"/api/v1/hours/{observed_entry['id']}/observation-minutes"
+        self.assertEqual(casey.post(url, {"observation_minutes": 60}, format="json").status_code, 403)
+        self.assertEqual(jordan.post(url, {"observation_minutes": 0}, format="json").status_code, 400)
+        updated = jordan.post(url, {"observation_minutes": 60}, format="json").data
+        self.assertEqual((updated["observation_minutes"], updated["status"], updated["hours"]), (60, "verified", 1.0))
+        month, _ = october()
+        self.assertEqual((month["status"], month["eligible_hours"]), ("met", 80.0))
