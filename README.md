@@ -221,7 +221,8 @@ None of these change a compliance figure. To count, a held appointment must be d
 | GET / PATCH | `/api/v1/organization/settings` | GET: workspace user; PATCH: Administrator | `time_zone`, `require_external_reporting` |
 | GET | `/api/v1/notifications` | signed-in user | the bell (also triggers due preparation reminders) |
 | POST | `/api/v1/notifications/{id}/read` · `/notifications/read-all` | signed-in user | mark read |
-| GET | `/api/v1/relationships/{id}/fieldwork-standard/history` | `relationship.view` | every change to the trainee's governing fieldwork standard: previous and new selection, basis, application year, note, who, when |
+| GET | `/api/v1/fieldwork-standard/trainees` | `fieldwork_standard.history.view` | fieldwork trainees whose standard history the caller may read (Administrators: all, without opening the relationship) |
+| GET | `/api/v1/relationships/{id}/fieldwork-standard/history` | `fieldwork_standard.history.view` (Administrator, Clinical Director, the parties) | every change to the trainee's governing fieldwork standard: previous and new selection, basis, application year, note, who, when |
 | POST | `/api/v1/relationships/{id}/prior-hours/review` | `relationship.edit` | mark prior post-certification hours (entered at setup) reviewed |
 | GET / POST | `/api/v1/hours/{id}/observation-minutes` | GET: `cycle.view`; POST: `hours.verify` | observed minutes on an observed entry and every correction to it; POST records or corrects them (BACB 2027). Not recorded counts as 0 |
 

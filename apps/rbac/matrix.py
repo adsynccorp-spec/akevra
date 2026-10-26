@@ -14,6 +14,12 @@ specific SupervisoryRelationship may Edit/View that one relationship.
 An Administrator who is not a party is denied any relationship access.
 The exception grants no other clinical right.
 
+Fieldwork standard history (client approval, Oct 2026)
+------------------------------------------------------
+An Administrator may read the history of a trainee's governing fieldwork
+standard (who changed it, when, from what, to what, and the note) for audit
+and compliance purposes, read-only. It does not open the relationship.
+
 M3 facilitation (client review, Sep 2026)
 -----------------------------------------
 An Administrator may create an eligible Supervisor-Supervisee relationship
@@ -53,6 +59,7 @@ PERMISSIONS = [
     "reports.export",
     "audit.view",
     "clinical.view",
+    "fieldwork_standard.history.view",
 ]
 
 MATRIX = {
@@ -85,6 +92,7 @@ MATRIX = {
         "reports.export": True,
         "audit.view": True,
         "clinical.view": False,
+        "fieldwork_standard.history.view": True,
     },
     OrgRole.CLINICAL_DIRECTOR: {
         "org.settings.manage": False,
@@ -115,6 +123,7 @@ MATRIX = {
         "reports.export": True,
         "audit.view": True,
         "clinical.view": True,
+        "fieldwork_standard.history.view": True,
     },
     RelationshipRole.SUPERVISOR: {
         "org.settings.manage": False,
@@ -145,6 +154,7 @@ MATRIX = {
         "reports.export": True,
         "audit.view": True,
         "clinical.view": True,
+        "fieldwork_standard.history.view": True,
     },
     RelationshipRole.SUPERVISEE: {
         "org.settings.manage": False,
@@ -175,6 +185,7 @@ MATRIX = {
         "reports.export": False,
         "audit.view": False,
         "clinical.view": True,
+        "fieldwork_standard.history.view": True,
     },
 }
 

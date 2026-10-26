@@ -14,6 +14,7 @@ from apps.supervision.views import (
     DevelopmentPlanListView,
     EligiblePartiesView,
     FieldworkStandardHistoryView,
+    FieldworkStandardTraineesView,
     IntakeView,
     MilestoneTransitionView,
     PriorHoursReviewView,
@@ -30,6 +31,7 @@ urlpatterns = [
     path("relationships/<uuid:pk>", RelationshipDetailView.as_view(), name="relationship-detail"),
     path("relationships/<uuid:pk>/intake", IntakeView.as_view(), name="relationship-intake"),
     path("relationships/<uuid:pk>/prior-hours/review", PriorHoursReviewView.as_view(), name="relationship-prior-hours-review"),
+    path("fieldwork-standard/trainees", FieldworkStandardTraineesView.as_view(), name="fieldwork-standard-trainees"),
     path("relationships/<uuid:pk>/fieldwork-standard/history", FieldworkStandardHistoryView.as_view(), name="relationship-fieldwork-standard-history"),
     path(
         "relationships/<uuid:pk>/development-plans",

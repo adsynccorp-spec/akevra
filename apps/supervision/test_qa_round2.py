@@ -217,6 +217,17 @@ class QaRound2Tests(TestCase):
         self.assertEqual((first["changed_by"], first["new"]["basis"], first["new"]["application_year"]),
                          (self.jordan.full_name, "application_year", 2026))
         self.assertEqual(casey.get(f"{url}/fieldwork-standard/history").status_code, 200)  # the trainee can read it too
+        # An Administrator reads the history (read-only) without opening the relationship
+        admin = self.as_user("settings.admin@akevra.test")
+        self.assertEqual(admin.get(url).status_code, 403)
+        self.assertEqual(admin.get(f"{url}/fieldwork-standard/history").data["changes"], history["changes"])
+        listed = admin.get("/api/v1/fieldwork-standard/trainees").data["trainees"]
+        self.assertIn(str(fw.id), [t["relationship_id"] for t in listed])
+        self.assertEqual(admin.patch(url, {"fieldwork_requirements": "both"}, format="json").status_code, 403)
+        # Someone with no part in this relationship and no organization role still cannot read it
+        outsider = self.as_user("morgan@akevra.test")
+        self.assertEqual(outsider.get(f"{url}/fieldwork-standard/history").status_code, 403)
+        self.assertNotIn(str(fw.id), [t["relationship_id"] for t in outsider.get("/api/v1/fieldwork-standard/trainees").data["trainees"]])
         month, _ = october()
         self.assertEqual((month["standard"], month["status"], month["eligible_hours"]), ("bacb_2027", "shortfall", 0.0))
         self.assertIn("below 60 minutes", month["adjustments"][0]["detail"])

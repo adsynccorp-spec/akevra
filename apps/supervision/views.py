@@ -39,6 +39,7 @@ from apps.supervision.models import (
     SupervisionSession,
     SuperviseeAssignmentPurpose,
     SuperviseeIntake,
+    SupervisionTrack,
     SupervisoryRelationship,
     eligible_tracks,
 )
@@ -857,9 +858,35 @@ def _standard_snapshot(data):
     }
 
 
+class FieldworkStandardTraineesView(APIView):
+    """Fieldwork trainees whose standard history the caller may read. An Administrator sees every one in
+    the organization (names and the current standard only — the relationship itself stays closed)."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Supervision"], summary="Fieldwork trainees whose standard history the caller may read",
+                   operation_id="fieldwork_standard_trainees", responses=JSON_RESPONSE)
+    def get(self, request):
+        rels = (SupervisoryRelationship.objects.filter(supervision_track=SupervisionTrack.SUPERVISED_FIELDWORK)
+                .exclude(record_status="archived").select_related("supervisor", "supervisee", "fieldwork_standard_determined_by")
+                .order_by("supervisee__first_name", "supervisee__last_name", "-started_on"))
+        rows = [{
+            "relationship_id": str(rel.id),
+            "trainee": rel.supervisee.full_name,
+            "supervisor": rel.supervisor.full_name,
+            "started_on": rel.started_on.isoformat() if rel.started_on else None,
+            "status": rel.status,
+            "standard": rel.fieldwork_requirements,
+            "determined_by": rel.fieldwork_standard_determined_by.full_name if rel.fieldwork_standard_determined_by_id else None,
+            "determined_at": rel.fieldwork_standard_determined_at.isoformat() if rel.fieldwork_standard_determined_at else None,
+        } for rel in rels if has_permission(request.user_account, "fieldwork_standard.history.view", relationship=rel)]
+        return Response({"trainees": rows})
+
+
 class FieldworkStandardHistoryView(APIView):
     """Every change to the trainee's governing fieldwork standard, newest first, read from the audit trail:
-    the previous and new selection with basis, application year and note, who changed it and when."""
+    the previous and new selection with basis, application year and note, who changed it and when.
+    Read-only; an Administrator may read it without access to the relationship."""
 
     permission_classes = [HasWorkspace]
 
@@ -871,7 +898,7 @@ class FieldworkStandardHistoryView(APIView):
         rel = _get_relationship(pk)
         if rel is None:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-        if not has_permission(request.user_account, "relationship.view", relationship=rel):
+        if not has_permission(request.user_account, "fieldwork_standard.history.view", relationship=rel):
             return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
         events = (AuditEvent.objects.filter(entity_type="supervisory_relationship", entity_id=str(rel.id), action="update")
                   .select_related("actor_user_account").order_by("-created_at"))
@@ -886,4 +913,7 @@ class FieldworkStandardHistoryView(APIView):
                 "previous": _standard_snapshot(before),
                 "new": _standard_snapshot(after),
             })
-        return Response({"current": _standard_snapshot(serialize_relationship(rel)), "changes": changes})
+        return Response({
+            "trainee": rel.supervisee.full_name, "supervisor": rel.supervisor.full_name,
+            "current": _standard_snapshot(serialize_relationship(rel)), "changes": changes,
+        })
