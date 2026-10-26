@@ -7,7 +7,8 @@ This repository covers:
 - **Sprint 0** — API, PostgreSQL, organizations, sign-in, RBAC, audit
 - **Supervision Setup & Development Plans** — relationships, supervisee intake, versioned IDPs, goals, competencies, milestones
 - **Monthly Work & Hours** — monthly cycles, assignments, hours, supervision sessions, BACB compliance calculations
-- **Scheduling & Supervision Sessions** — appointments, confirmations, prep notes, documenting a held appointment
+- **Scheduling & Supervision Sessions** — appointments, confirmations, structured preparation forms (versioned), documenting a held appointment
+- **Reporting periods & audit readiness** — shared service hours, period status, Supervision Audit, notifications, Settings (rule approval, organization settings)
 - **Competency Assessments** — ratings against plan competencies, review, official (locked) record
 - **Frontend** (`akevra-frontend/`) — React app for every Relationship Detail tab plus the global Assignments, Hours and Sessions pages
 
@@ -41,17 +42,22 @@ This repository covers:
 - **Compliance** — pure calculation functions in `apps/supervision/compliance.py`:
   - RBT: 5% of service hours, 2 contacts a month, 1 individual contact, 1 client observation
   - BCaBA: 5% (2% after 1,000 service hours), biweekly contact, quarterly observation, group ≤ 50%
-  - Fieldwork: 20–130 hours a month; supervised 5% / 4 contacts, concentrated 10% / 6 contacts; 1 observation; group ≤ 50%; concentrated hours count ×1.33 toward the total; 60% unrestricted (cumulative); BACB adjustment table
-  - Rules are versioned by date (2022 rules, and the 2027 BACB changes from 2027-01-01). A fieldwork relationship stays on the rules in force when it started
-  - Results show **"pending AKEVRA approval"** until the rules are approved (see [docs/COMPLIANCE_RULES_FOR_APPROVAL.md](docs/COMPLIANCE_RULES_FOR_APPROVAL.md))
+  - Fieldwork: 20–130 hours a month; supervised 5% / 4 contacts, concentrated 10% / 6 contacts; group ≤ 50%; concentrated hours count ×1.33 toward the total; 60% unrestricted (cumulative); BACB adjustment table. Only **verified** hours count; logged-but-unverified hours are shown separately
+  - **Two fieldwork standards**: BACB 2022 (1 observation contact a month) and BACB 2027 (observation by duration: 60 min supervised / 90 min concentrated). The standard follows the trainee's application date, not the calendar. A relationship can **track both** (default) until the standard is determined; choosing one needs a basis, must agree with the application/eligibility year, and records who decided and when (audited). Observed supervision entries carry `observation_minutes`; the Supervisor can add the duration to older entries (`POST /hours/{id}/observation-minutes`)
+  - RBT / BCaBA rules are versioned by date (current rules, and the 2027 BACB changes from 2027-01-01)
+  - Supervision is relationship-scoped (each supervisor sees their own sessions against the shared service hours) with the overall picture and each supervisor's contribution listed
+  - Rules come from the organization's **approved** rule set (Settings → Compliance Rules), falling back to the BACB defaults. Until an Administrator approves, results show **"pending AKEVRA approval"** (see [docs/COMPLIANCE_RULES_FOR_APPROVAL.md](docs/COMPLIANCE_RULES_FOR_APPROVAL.md))
 
 ### Scheduling & Supervision Sessions
 
 - **Appointments are logistics only** — scheduling, confirming, rescheduling or cancelling never changes a compliance figure. Only a documented session counts
 - Supervisor schedules one appointment or a weekly series (`repeat_weeks`); Supervisee confirms (`appointment.confirm`)
 - Reschedule (with reason), cancel (with reason), mark held, mark no-show. Every change is kept in the appointment history
-- **Prep notes** — the Supervisee writes a pre-supervision note on an upcoming appointment (`prep.submit`); the Supervisor reads it. Not compliance-bearing
-- **Document Session** — a held appointment opens the Log Session screen pre-filled; saving links the session to the appointment
+- **Supervision Preparation Form** — a structured form per pathway (RBT, BCaBA, BCBA professional development, student fieldwork) defined as data in `prep_templates.py`; questions can be conditional (`show_if`) and are required only when shown. Not compliance-bearing
+- Preparation can be filled on an upcoming appointment, or **before any session is scheduled** (standalone); it is attached automatically to the next session scheduled, and both people are told
+- **Every save is kept as a version** (`pre_supervision_note_revision`): the original submission and each edit, shown in the appointment history timeline
+- Notification times are shown in the **organization's time zone** (Settings), with the zone named
+- **Document Session** — a held appointment opens the Log Session screen pre-filled; saving links the session to the appointment. One documented session per appointment; duplicates are rejected
 
 ### Reporting periods, shared service hours and audit readiness
 
@@ -61,7 +67,15 @@ This repository covers:
 - **Period status**: Open → Ready for Review → Verified/Closed, every change recorded with who and why. Closing stores a snapshot of the inputs, result and rule-set ID; a closed month reports the snapshot and blocks compliance-bearing changes until it is reopened with a reason
 - **RBT Requirements Coordinator** as a dated designation per supervisee; **BACB certification numbers** on people
 - **Supervision Audit** (Reports & Audit): month-by-month BACB RBT audit-log columns for a supervisee across all supervisors (concluded relationships included), with flags for missing data and a trace to the underlying sessions and service-hours record; CSV export. Pathway-neutral, so the BCaBA log can be mapped from the same rows
-- **Notifications**: in-app bell plus email for scheduling, preparation, assignments, hours, sessions and assessments; `python manage.py send_preparation_reminders` (run hourly) sends one reminder per upcoming session without preparation
+- **Service-hour periods**: hours can be entered for a date range (e.g. a pay period), split into the months they cover. Each supervisor **reviews** the shared record separately; the record shows per supervisor reviewed / pending
+- **External supervision**: supervision held outside AKEVRA can be recorded per month; an organization can require it before a month is closed (Settings → *Require external reporting*)
+- **Supervision Audit** is available to Administrators / Clinical Directors for any supervisee, and to a supervisee for **their own** audit (*My Ongoing Supervision Audit*). From/To month range; months before the first relationship are not flagged
+- **Notifications**: in-app bell plus email for scheduling, preparation, assignments, hours, sessions and assessments. Preparation reminders (one per session within 48 h without preparation) run automatically when the bell polls (at most every 2 minutes per organization); `python manage.py send_preparation_reminders` can also be scheduled hourly
+
+### Settings
+
+- **Compliance Rules** (Administrator) — review each pathway's BACB default parameters per version, adjust values if needed, and approve from a date with a note. Stored as the organization's own rule set (who/when/note); a new approval supersedes the previous one, which stays on file
+- **Organization settings** — time zone (used in notifications and emails, default `America/New_York`) and *Require external reporting*. Changes are audited
 
 ### Competency Assessments
 
@@ -184,9 +198,31 @@ The QA Sandbox is a separate organization, so testing there never touches the No
 | GET / PATCH | `/api/v1/appointments/{id}` | party; PATCH: `appointment.manage` | one appointment with history; reschedule (with `reason`) |
 | POST | `/api/v1/appointments/{id}/confirm` | `appointment.confirm` | Supervisee confirms |
 | POST | `/api/v1/appointments/{id}/cancel` · `/complete` · `/no-show` | `appointment.manage` | cancel (with `reason`), mark held, mark no-show |
-| PUT | `/api/v1/appointments/{id}/prep-note` | `prep.submit` (Supervisee) | save the prep note on an upcoming appointment (returned on the appointment) |
+| PUT | `/api/v1/appointments/{id}/prep-note` | `prep.submit` (Supervisee) | save structured answers on an upcoming appointment; each save adds a version |
+| GET / PUT | `/api/v1/relationships/{id}/preparation` | GET: party; PUT: Supervisee | the pathway's form template, waiting / linked preparations; PUT saves preparation before a session is scheduled |
 
 None of these change a compliance figure. To count, a held appointment must be documented as a session (`POST .../sessions` with `appointment_id`).
+
+## Reporting Period, Audit & Settings APIs
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| POST | `/api/v1/cycles/{id}/status` | `cycle.manage` | Open → Ready for Review → Closed (closing stores a snapshot), reopen with a reason |
+| GET | `/api/v1/supervisees/{id}/service-hours` | party | shared monthly service-hours records with corrections (internal / external / confirmed zero with reason); entered via `PUT /relationships/{id}/service-hours` |
+| POST | `/api/v1/relationships/{id}/service-hours/periods` | `service_hours.attest` | service hours entered for a date range, split by month |
+| POST | `/api/v1/service-hours/{id}/review` | Supervisor | this supervisor's review of the shared record |
+| GET / POST | `/api/v1/supervisees/{id}/external-supervision` | GET: party; POST: the supervisee or Admin / Clinical Director | supervision held outside AKEVRA, per month |
+| GET / POST · PATCH | `/api/v1/supervisees/{id}/coordinators` · `/coordinators/{id}` | Administrator / Clinical Director | RBT Requirements Coordinator designations (dated) |
+| PATCH | `/api/v1/people/{id}/certification` | Administrator or the person | BACB certification number |
+| GET | `/api/v1/supervisees/{id}/audit-log` | Admin / Clinical Director, or the supervisee for themselves | month-by-month audit log (`start`, `end`; `export=csv`) |
+| GET | `/api/v1/audit/people` | signed-in user | supervisees the caller may audit (only themselves for a supervisee) |
+| GET | `/api/v1/compliance-rules` | signed-in user | rule catalog per pathway, rules in force, approval history |
+| POST | `/api/v1/compliance-rules/approve` | Administrator | approve a pathway's rules from a date, with optional overrides and a note |
+| GET / PATCH | `/api/v1/organization/settings` | GET: workspace user; PATCH: Administrator | `time_zone`, `require_external_reporting` |
+| GET | `/api/v1/notifications` | signed-in user | the bell (also triggers due preparation reminders) |
+| POST | `/api/v1/notifications/{id}/read` · `/notifications/read-all` | signed-in user | mark read |
+| POST | `/api/v1/relationships/{id}/prior-hours/review` | `relationship.edit` | mark prior post-certification hours (entered at setup) reviewed |
+| GET / POST | `/api/v1/hours/{id}/observation-minutes` | GET: `cycle.view`; POST: `hours.verify` | observed minutes on an observed entry and every correction to it; POST records or corrects them (BACB 2027). Not recorded counts as 0 |
 
 ## Competency Assessment APIs
 
@@ -317,16 +353,21 @@ Postgres database: **`akevra_sprint0`**
 | `supervision_session` / `session_attachment` | Documented supervision sessions and their files |
 | `relationship_note` | Private supervisor notes |
 | `appointment` / `appointment_event` | Scheduled sessions and their history |
-| `pre_supervision_note` | Supervisee prep notes on appointments |
+| `pre_supervision_note` / `pre_supervision_note_revision` | Supervisee preparation (structured answers) and every saved version |
 | `competency_assessment` | Competency ratings (Draft → Ready for Review → Official) |
-| `compliance_rule_set` / `compliance_rule_parameter` | Approved compliance rules (empty until AKEVRA approves) |
+| `compliance_rule_set` / `compliance_rule_parameter` | Approved compliance rules per organization (empty until approved in Settings) |
+| `monthly_cycle_event` | Period status history (who, when, why) |
+| `service_hours_record` / `service_hours_review` / `service_hours_period_entry` | Shared monthly service hours, each supervisor's review, date-range entries |
+| `external_supervision_record` | Supervision held outside AKEVRA |
+| `requirements_coordinator_designation` | RBT Requirements Coordinator (dated) |
+| `notification` | In-app notifications (the bell) |
 | `audit_event` | Who changed what, and when |
 
 ---
 
-## Deploy on Render (free) + Neon (free Postgres)
+## Deploy on Render + Neon (current staging)
 
-> **Note:** This documents a low-cost development/staging setup. Development and staging use **Railway** (application server) + **Neon** (managed PostgreSQL). Production will be AWS ECS/Fargate + RDS PostgreSQL + S3 in the applicable deployment milestone.
+> **Note:** Staging currently runs on **Render** (`https://akevra.onrender.com`) + **Neon**; Railway (below) is the earlier setup. Production will be AWS ECS/Fargate + RDS PostgreSQL + S3 in the applicable deployment milestone.
 
 Neon gives **one** connection string. Put that whole string in Render as `DATABASE_URL`. Do not split it into `DB_NAME` / `DB_USER` unless you want to.
 
@@ -338,7 +379,9 @@ Neon gives **one** connection string. Put that whole string in Render as `DATABA
 |---|---|
 | Root Directory | `akevra` if the GitHub repo is the Golf app; leave empty if the repo is only AKEVRA |
 | Build command | `pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate` |
-| Start command | `gunicorn config.wsgi:application --bind 0.0.0.0:$PORT` |
+| Start command | `gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120` |
+| Health check path | `/api/v1/health` |
+| Region | the same region as the Neon database |
 
 **Environment variables (Render → Environment):**
 
@@ -349,8 +392,13 @@ Neon gives **one** connection string. Put that whole string in Render as `DATABA
 | `DEBUG` | `False` |
 | `ALLOWED_HOSTS` | `.onrender.com` |
 | `CSRF_TRUSTED_ORIGINS` | `https://YOUR-SERVICE.onrender.com` |
+| `MFA_ENCRYPTION_KEY` | Fernet key (same command as below) |
+| `CORS_ORIGINS` / `FRONTEND_URL` | the frontend URL, e.g. `https://akevra-frontend.vercel.app` |
+| `MEDIA_ROOT` | `/opt/render/project/src/media` (or a Render Disk mount path so uploads survive redeploys) |
 
-After the first successful deploy, open Render **Shell** once and run:
+**Stability:** the free plan sleeps after ~15 minutes idle, and the first request then takes 30–60 s (users see timeouts). For client testing use the Starter plan, or ping `/api/v1/health` every 5 minutes (e.g. UptimeRobot).
+
+Migrations run in the build command. After the first successful deploy, open Render **Shell** once and run:
 
 ```
 python manage.py seed_sprint0
@@ -403,13 +451,13 @@ Run `python manage.py migrate` again after every deploy that adds migrations.
 
 **Uploaded files:** assignment and session files are stored on disk at `MEDIA_ROOT`. The Railway container disk is wiped on every deploy, so attach a Railway **Volume** and set `MEDIA_ROOT` to its mount path. Without it, uploaded files are lost on redeploy (the database records stay). Production moves files to S3.
 
-**Compliance rule approval:** after AKEVRA signs off [docs/COMPLIANCE_RULES_FOR_APPROVAL.md](docs/COMPLIANCE_RULES_FOR_APPROVAL.md), run once:
+**Compliance rule approval:** an Administrator approves the rules in the app under **Settings → Compliance Rules** (per pathway, from a date, with a note). The command below is still available for a platform-wide approval:
 
 ```
 python manage.py approve_compliance_rules --name "AKEVRA Approved" --effective-from 2026-01-01
 ```
 
-Change a single value with `--set TRACK:KEY=VALUE` (e.g. `--set rbt_ongoing_supervision:min_supervision_percent=5`), or later in the Django admin under Compliance rule sets.
+Change a single value with `--set TRACK:KEY=VALUE` (e.g. `--set rbt_ongoing_supervision:min_supervision_percent=5`).
 
 **Frontend (Vercel):** project root `akevra-frontend`, build `npm run build`, output `dist`, env `VITE_API_URL`. Details in `akevra-frontend/README.md`.
 
@@ -433,8 +481,12 @@ akevra02/
 | Supervision Setup | `models.py`, `services.py`, `views.py`, `tests.py` |
 | Monthly Work & Hours | `monthly.py`, `monthly_views.py`, `test_monthly_work.py` |
 | Compliance calculations | `compliance.py` (pure functions + versioned BACB defaults) |
-| Scheduling | `scheduling.py`, `scheduling_views.py`, `test_scheduling.py` |
+| Scheduling & preparation | `scheduling.py`, `scheduling_views.py`, `prep_templates.py`, `test_scheduling.py` |
 | Competency Assessments | `assessments.py`, `assessment_views.py`, `test_assessments.py` |
+| Reporting periods, service hours, audit | `periods.py`, `period_views.py`, `audit_log.py`, `test_periods.py` |
+| Settings (rule approval, organization) | `rules.py`, `settings_views.py` |
+| Notifications | `notifications.py`, `notification_views.py`, `management/commands/send_preparation_reminders.py` |
+| QA rounds | `test_qa_round.py`, `test_qa_round2.py` |
 
 Role permissions are in `apps/rbac/matrix.py`. Row-level security SQL for each table is in `apps/core/sql/`. Sprint 0 acceptance tests remain in `apps/core/tests.py`.
 
@@ -442,11 +494,13 @@ Role permissions are in `apps/rbac/matrix.py`. Row-level security SQL for each t
 
 ## Not yet built
 
-- **Reports & Audit** export and the **AI Teaching Assistant** — later sprints
-- Frontend placeholder pages: Active / Closed relationships, the global Compliance page, Settings, Support
-- **Compliance reminders** — the table exists; scheduled reminder emails are not sent yet
+- The **AI Teaching Assistant** — later sprint
+- Frontend placeholder pages: Active / Closed relationships, the global Compliance page, Support
+- **Compliance reminders** beyond preparation reminders (the `compliance_reminder` table exists)
 
 Waiting on the client:
 
-- **AKEVRA approval of the compliance rules** — until then, results show "pending AKEVRA approval" (see the approval command above)
-- **File storage on staging** — attach a Railway Volume (`MEDIA_ROOT`) or move uploads to S3-type storage
+- **Approval of the compliance rules** in Settings → Compliance Rules — until then, results show "pending AKEVRA approval"
+- The client's own **Supervision Preparation Form** questions (the shared Google Form links require sign-in); they slot into `prep_templates.py`
+- **Staging plan** — Render Starter (or a health-check ping) so the server does not sleep during testing
+- **File storage on staging** — a persistent disk (`MEDIA_ROOT`) or S3-type storage

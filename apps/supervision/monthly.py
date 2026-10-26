@@ -364,6 +364,20 @@ def record_observation_minutes(entry, actor, minutes):
     return entry
 
 
+def observation_minutes_history(entry):
+    """Every change a Supervisor made to an entry's observation duration, oldest first (from the audit trail)."""
+    from apps.audit.models import AuditEvent
+
+    events = (AuditEvent.objects.filter(entity_type="hours_entry", entity_id=str(entry.id), action="hours.observation_minutes")
+              .select_related("actor_user_account").order_by("created_at"))
+    return [{
+        "before": (event.before or {}).get("observation_minutes"),
+        "after": (event.after or {}).get("observation_minutes"),
+        "by": event.actor_user_account.full_name if event.actor_user_account_id else None,
+        "at": event.created_at.isoformat(),
+    } for event in events]
+
+
 def return_fieldwork_hours(entry, actor, *, reason):
     if entry.status != HoursStatus.PENDING:
         raise ValidationError("Only hours waiting for review can be returned.")

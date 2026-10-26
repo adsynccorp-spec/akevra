@@ -222,3 +222,9 @@ class QaRound2Tests(TestCase):
         self.assertEqual((updated["observation_minutes"], updated["status"], updated["hours"]), (60, "verified", 1.0))
         month, _ = october()
         self.assertEqual((month["status"], month["eligible_hours"]), ("met", 80.0))
+        # Each correction is kept: who changed it, from what, to what; the supervisee can read it
+        jordan.post(url, {"observation_minutes": 45}, format="json")
+        history = casey.get(url).data
+        self.assertEqual(history["observation_minutes"], 45)
+        self.assertEqual([(h["before"], h["after"], h["by"]) for h in history["history"]],
+                         [(observed_entry["observation_minutes"], 60, self.jordan.full_name), (60, 45, self.jordan.full_name)])

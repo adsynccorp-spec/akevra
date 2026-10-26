@@ -29,6 +29,7 @@ from apps.supervision.models import (
     SupervisionTrack,
     SupervisoryRelationship,
 )
+from apps.supervision.periods import review_status
 
 PATHWAYS = {"rbt": SupervisionTrack.RBT_ONGOING, "bcaba": SupervisionTrack.BCABA_ONGOING}
 CSV_COLUMNS = [
@@ -170,6 +171,7 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                 "service_hours_record": None if record is None else {
                     "id": str(record.id), "hours": float(record.hours), "entered_by": record.entered_by.full_name,
                     "entered_at": record.created_at.isoformat(), "reviewed_by": ", ".join(r.reviewer.full_name for r in record.reviews.filter(record_status="active").select_related("reviewer")) or None,
+                    "review_status": review_status(record),
                     "source_type": record.source_type,
                 },
                 "sessions": [

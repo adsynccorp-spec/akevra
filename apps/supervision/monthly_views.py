@@ -528,6 +528,16 @@ class HoursVerifyView(APIView):
 class HoursObservationMinutesView(APIView):
     permission_classes = [HasWorkspace]
 
+    @extend_schema(tags=["Hours"], summary="The observation duration on an entry and every correction to it",
+                   operation_id="hours_observation_minutes_history", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        entry = _hours_queryset().filter(pk=pk).first()
+        if entry is None:
+            return _not_found()
+        if denied := _denied(request, "cycle.view", entry.cycle.relationship, "hours_entry", entry.id):
+            return denied
+        return Response({"observation_minutes": entry.observation_minutes, "history": monthly.observation_minutes_history(entry)})
+
     @extend_schema(tags=["Hours"], summary="Record the observation duration on an observed entry (Supervisor)", request=None,
                    operation_id="hours_observation_minutes", responses=JSON_RESPONSE)
     def post(self, request, pk):

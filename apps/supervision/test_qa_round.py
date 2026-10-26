@@ -231,4 +231,5 @@ class QaRoundTests(TestCase):
         log = jordan.get(f"/api/v1/supervisees/{self.alex.id}/audit-log?start=2026-03&end=2026-08").data
         self.assertEqual([(r["year"], r["month"]) for r in log["rows"]][::5], [(2026, 3), (2026, 8)])
         self.assertEqual(len(log["rows"]), 6)
+        self.assertEqual(log["summary"]["months"], 6)  # the summary covers the selected months only
         self.assertEqual(jordan.get(f"/api/v1/supervisees/{self.alex.id}/audit-log?start=2026-08&end=2026-03").status_code, 400)
