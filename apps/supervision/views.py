@@ -842,3 +842,48 @@ class PriorHoursReviewView(APIView):
         rel.save(update_fields=["prior_service_hours_reviewed_by", "prior_service_hours_reviewed_at", "updated_at"])
         write_audit(action="prior_hours.review", entity_type="supervisory_relationship", entity_id=rel.id, request=request)
         return Response(serialize_relationship(rel, request.user_account))
+
+
+STANDARD_FIELDS = ("fieldwork_requirements", "fieldwork_standard_basis", "fieldwork_application_year", "fieldwork_standard_note")
+
+
+def _standard_snapshot(data):
+    data = data or {}
+    return {
+        "standard": data.get("fieldwork_requirements") or "both",
+        "basis": data.get("fieldwork_standard_basis") or "",
+        "application_year": data.get("fieldwork_application_year"),
+        "note": data.get("fieldwork_standard_note") or "",
+    }
+
+
+class FieldworkStandardHistoryView(APIView):
+    """Every change to the trainee's governing fieldwork standard, newest first, read from the audit trail:
+    the previous and new selection with basis, application year and note, who changed it and when."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Supervision"], summary="History of the trainee's governing fieldwork standard",
+                   operation_id="fieldwork_standard_history", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        from apps.audit.models import AuditEvent
+
+        rel = _get_relationship(pk)
+        if rel is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not has_permission(request.user_account, "relationship.view", relationship=rel):
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        events = (AuditEvent.objects.filter(entity_type="supervisory_relationship", entity_id=str(rel.id), action="update")
+                  .select_related("actor_user_account").order_by("-created_at"))
+        changes = []
+        for event in events:
+            before, after = event.before or {}, event.after or {}
+            if all(before.get(f) == after.get(f) for f in STANDARD_FIELDS):
+                continue  # an edit to something else on the relationship
+            changes.append({
+                "changed_at": event.created_at.isoformat(),
+                "changed_by": event.actor_user_account.full_name if event.actor_user_account_id else None,
+                "previous": _standard_snapshot(before),
+                "new": _standard_snapshot(after),
+            })
+        return Response({"current": _standard_snapshot(serialize_relationship(rel)), "changes": changes})

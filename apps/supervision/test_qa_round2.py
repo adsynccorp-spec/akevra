@@ -208,6 +208,15 @@ class QaRound2Tests(TestCase):
 
         # 2027 standard applies to the 2026 month too (by application, not by calendar month)
         jordan.patch(url, {"fieldwork_requirements": "bacb_2027", "fieldwork_application_year": 2027}, format="json")
+        # Every earlier selection is retrievable with who, when, basis, year and note (newest first)
+        history = jordan.get(f"{url}/fieldwork-standard/history").data
+        self.assertEqual(history["current"]["standard"], "bacb_2027")
+        self.assertEqual([(c["previous"]["standard"], c["new"]["standard"]) for c in history["changes"]],
+                         [("bacb_2022", "bacb_2027"), ("both", "bacb_2022")])
+        first = history["changes"][-1]
+        self.assertEqual((first["changed_by"], first["new"]["basis"], first["new"]["application_year"]),
+                         (self.jordan.full_name, "application_year", 2026))
+        self.assertEqual(casey.get(f"{url}/fieldwork-standard/history").status_code, 200)  # the trainee can read it too
         month, _ = october()
         self.assertEqual((month["standard"], month["status"], month["eligible_hours"]), ("bacb_2027", "shortfall", 0.0))
         self.assertIn("below 60 minutes", month["adjustments"][0]["detail"])
