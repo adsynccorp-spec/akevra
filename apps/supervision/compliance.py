@@ -551,12 +551,26 @@ def _fieldwork_result(cycle, rules_by_standard):
     }, source
 
 
+def organization_today(organization):
+    """Today's date in the organization's time zone."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    from django.utils import timezone
+
+    try:
+        return timezone.localdate(timezone=ZoneInfo(organization.time_zone))
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.localdate()
+
+
 def _supervisee_sessions(relationship, **filters):
-    """Qualifying sessions from every relationship this supervisee has on the same pathway."""
+    """Qualifying sessions from every relationship this supervisee has on the same pathway. A session
+    dated in the future never counts before its date."""
     return SupervisionSession.objects.filter(
         cycle__relationship__supervisee_id=relationship.supervisee_id,
         cycle__relationship__supervision_track=relationship.supervision_track,
         record_status="active", status=SessionStatus.COMPLETED, meeting_method__in=QUALIFYING_MEETING_METHODS,
+        occurred_on__lte=organization_today(relationship.organization),
         **filters,
     )
 
@@ -663,6 +677,9 @@ def _ongoing_month_for(cycle, rules):
         "internal_service_hours": _out(None if record is None else _dec(record.hours)),
         "external_service_hours": _out(external_service),
         "external_agencies": sorted({r.external_organization for r in outside_hours} | {r.organization_name for r in outside_supervision}),
+        # Kept apart so a supervision-only agency isn't shown as contributing service hours
+        "external_service_agencies": sorted({r.external_organization for r in outside_hours if r.hours > 0}),
+        "external_supervision_agencies": sorted({r.organization_name for r in outside_supervision}),
         "supervision_hours": _out(all_supervision),
         "internal_supervision_hours": _out(internal_minutes / Decimal("60")),
         "external_supervision_hours": _out(external_minutes / Decimal("60")),

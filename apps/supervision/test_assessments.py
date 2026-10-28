@@ -67,11 +67,20 @@ class CompetencyAssessmentTests(TestCase):
         listed = alex.get(url).data
         self.assertEqual([a["id"] for a in listed["assessments"]], [aid])  # drafts stay hidden
         self.assertFalse(listed["can_manage"])
-        self.assertEqual(listed["summary"], {"total_assessed": 1, "proficient": 1, "developing": 0, "needs_improvement": 0})
+        self.assertEqual(listed["summary"], {"total_assessed": 1, "proficient": 1, "developing": 0, "needs_improvement": 0,
+                                             "by_rating": {"needs_training": 0, "developing": 0, "performs_with_support": 0, "independent": 1}})
 
         jordan.patch(f"/api/v1/assessments/{second['id']}", {"documented_content": "Missed IOA twice."}, format="json")
         jordan.post(f"/api/v1/assessments/{second['id']}/finalize")
         summary = jordan.get(url).data["summary"]
         self.assertEqual((summary["total_assessed"], summary["needs_improvement"]), (2, 1))
+        self.assertEqual(summary["by_rating"]["needs_training"], 1)
+        # One unfinished assessment per competency, date and goal: a repeated Save Draft can't duplicate it
+        body = {"plan_competency_id": str(docs.id), "related_goal_id": str(goal.id), "assessed_on": "2026-10-20"}
+        self.assertEqual(jordan.post(url, body, format="json").status_code, 201)
+        duplicate = jordan.post(url, body, format="json")
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn("already exists", str(duplicate.data))
+        self.assertEqual(jordan.post(url, {**body, "assessed_on": "2026-10-21"}, format="json").status_code, 201)
         director = self.as_user("director@akevra.test")
-        self.assertEqual(len(director.get(url).data["assessments"]), 2)
+        self.assertEqual(len([a for a in director.get(url).data["assessments"] if a["status"] == "official"]), 2)

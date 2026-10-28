@@ -162,6 +162,56 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual(alex.get(f"/api/v1/supervisees/{self.alex.id}/audit-log").status_code, 200)
         self.assertEqual(casey.get(f"/api/v1/supervisees/{self.alex.id}/audit-log").status_code, 403)
 
+    def test_qa_round3_corrections_future_sessions_and_agency_lists(self):
+        """Client QA round 3: an unchanged correction doesn't reset reviews, future-dated sessions
+        can't be completed or counted early, and a supervision-only agency isn't listed as a
+        service-hours contributor."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.supervision.models import SupervisionSession
+
+        jordan, alex = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test")
+        record = self.attest(alex, 8, "105", notes="Timesheet").data
+        jordan.post(f"/api/v1/service-hours/{record['id']}/review", {"relationship_id": str(self.rbt.id)}, format="json")
+        unchanged = self.attest(alex, 8, "105", notes="Timesheet")
+        self.assertEqual(unchanged.status_code, 400)
+        self.assertIn("Nothing has changed", str(unchanged.data))
+        current = self.month(jordan, self.rbt, 8)
+        records = jordan.get(f"/api/v1/supervisees/{self.alex.id}/service-hours").data["records"]
+        self.assertEqual([(r["id"], len(r["reviews"])) for r in records if r["status"] == "active"], [(record["id"], 1)])
+        # A real change (notes included) is still a correction that needs a new review
+        changed = self.attest(alex, 8, "105", notes="Timesheet v2").data
+        self.assertEqual((changed["supersedes_id"], changed["reviews"]), (record["id"], []))
+        self.assertEqual(current["service_hours"], 105.0)
+
+        # Future-dated sessions
+        tomorrow = (timezone.localdate() + timedelta(days=2)).isoformat()
+        refused = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
+                              {"occurred_on": tomorrow, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person"},
+                              format="json")
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("hasn't happened yet", str(refused.data))
+        draft = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
+                            {"occurred_on": tomorrow, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person",
+                             "draft": True}, format="json")
+        self.assertEqual(draft.status_code, 201, draft.data)
+        # A future-dated completed record (e.g. imported earlier) doesn't count before its date
+        future = date.fromisoformat(tomorrow)
+        SupervisionSession.objects.filter(pk=draft.data["id"]).update(status="completed")
+        month = self.month(jordan, self.rbt, future.month)
+        self.assertEqual(month["supervision_hours"], 0.0)
+
+        # A supervision-only agency isn't a service-hours contributor
+        self.attest(alex, 8, "20", scope="external", external_organization="Bright Path ABA")
+        alex.post(f"/api/v1/supervisees/{self.alex.id}/external-supervision",
+                  {"occurred_on": "2026-08-12", "duration_minutes": 60, "supervisor_name": "Dana Lee", "organization_name": "Harbor ABA"},
+                  format="json")
+        overall = self.month(jordan, self.rbt, 8)["overall"]
+        self.assertEqual(overall["external_service_agencies"], ["Bright Path ABA"])
+        self.assertEqual(overall["external_supervision_agencies"], ["Harbor ABA"])
+
     def test_internal_and_external_sources(self):
         """Another agency's hours and supervision are kept, attributed to their source, in one
         supervisee-month picture — without changing what this organization is responsible for."""

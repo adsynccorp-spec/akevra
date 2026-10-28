@@ -43,14 +43,27 @@ def create_assessment(relationship, actor, **fields):
         status=AssessmentStatus.DRAFT,
     )
     _apply(assessment, relationship, fields)
+    _ensure_no_duplicate_draft(assessment)
     assessment.save()
     return assessment
 
 
+def _ensure_no_duplicate_draft(assessment):
+    """One open draft per competency, date and goal, so a repeated Save Draft can't create copies."""
+    duplicate = CompetencyAssessment.objects.filter(
+        relationship_id=assessment.relationship_id, plan_competency_id=assessment.plan_competency_id,
+        assessed_on=assessment.assessed_on, related_goal_id=assessment.related_goal_id,
+        status__in=[AssessmentStatus.DRAFT, AssessmentStatus.READY_FOR_REVIEW],
+    ).exclude(pk=assessment.pk).exclude(record_status="archived")
+    if duplicate.exists():
+        raise ValidationError("An unfinished assessment already exists for this competency, date and goal. Open it to continue instead.")
+
+
 def update_assessment(assessment, **fields):
     if assessment.status == AssessmentStatus.OFFICIAL:
-        raise ValidationError("An official assessment is final. Record a new assessment instead.")
+        raise ValidationError("A finalized assessment can't be changed. Record a new assessment instead.")
     _apply(assessment, assessment.relationship, fields)
+    _ensure_no_duplicate_draft(assessment)
     assessment.save()
     return assessment
 
@@ -75,7 +88,7 @@ def return_to_draft(assessment):
 
 def finalize(assessment):
     if assessment.status == AssessmentStatus.OFFICIAL:
-        raise ValidationError("This assessment is already official.")
+        raise ValidationError("This assessment is already finalized.")
     if not assessment.rating:
         raise ValidationError("Give a rating before finalizing.")
     if not (assessment.documented_content or "").strip():
@@ -122,4 +135,6 @@ def summarize(assessments):
         "proficient": sum(r in (CompetencyLevel.INDEPENDENT, CompetencyLevel.PERFORMS_WITH_SUPPORT) for r in ratings),
         "developing": sum(r == CompetencyLevel.DEVELOPING for r in ratings),
         "needs_improvement": sum(r == CompetencyLevel.NEEDS_TRAINING for r in ratings),
+        # One count per level of the four-level rating scale
+        "by_rating": {level: sum(r == level for r in ratings) for level in RATINGS},
     }

@@ -9,7 +9,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.supervision.compliance import external_hours, service_hours_record
+from apps.supervision.compliance import external_hours, organization_today, service_hours_record
 from apps.supervision.periods import ensure_open, record_service_hours, serialize_events, serialize_service_hours
 from apps.supervision.models import (
     Assignment,
@@ -475,6 +475,16 @@ def ensure_not_duplicate(session):
             )
 
 
+def ensure_not_future(session):
+    """A session can't be recorded as completed before the day it happens (in the organization's
+    time zone), so a future-dated record never counts toward requirements early."""
+    if session.occurred_on > organization_today(session.organization):
+        raise ValidationError(
+            f"A session dated {session.occurred_on:%b %d, %Y} hasn't happened yet, so it can't be completed. "
+            "Save it as a draft or schedule it, and complete it on or after the session date."
+        )
+
+
 def document_session(relationship, actor, *, draft=False, files=(), appointment_id=None, **fields):
     """A completed record counts toward requirements; a draft doesn't until it is completed."""
     from apps.supervision.scheduling import link_session
@@ -484,6 +494,7 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
     session.cycle = cycle_for_date(relationship, session.occurred_on)
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
     if not draft:
+        ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
         ensure_not_duplicate(session)
     with transaction.atomic():
@@ -506,6 +517,7 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
     if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
     if complete:
+        ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
         ensure_not_duplicate(session)
         session.status = SessionStatus.COMPLETED

@@ -62,12 +62,14 @@ This repository covers:
 ### Reporting periods, shared service hours and audit readiness
 
 - **One service-hours record per supervisee and month**, shared by every relationship (concurrent supervisors never create separate denominators). Supervision is totalled across all of the supervisee's supervisors on the pathway, with each supervisor's contribution listed
-- **Missing vs confirmed zero**: no record = Missing (never treated as zero); 0 hours needs a reason (service hold, illness, …). A correction supersedes the record and keeps the original
+- **Missing vs confirmed zero**: no record = Missing (never treated as zero); 0 hours needs a reason (service hold, illness, …). A correction supersedes the record and keeps the original. Saving with nothing changed is rejected (reviews are kept); any real change, notes included, needs each supervisor's review again, and the form warns before completed reviews reset
 - **Provenance** on service-hours and fieldwork hours records: source type/system/reference, supporting reference, entered by, reviewed by, timestamps
 - **Period status**: Open → Ready for Review → Verified/Closed, every change recorded with who and why. Closing stores a snapshot of the inputs, result and rule-set ID; a closed month reports the snapshot and blocks compliance-bearing changes until it is reopened with a reason
 - **RBT Requirements Coordinator** as a dated designation per supervisee; **BACB certification numbers** on people
 - **Supervision Audit** (Reports & Audit): month-by-month BACB RBT audit-log columns for a supervisee across all supervisors (concluded relationships included), with flags for missing data and a trace to the underlying sessions and service-hours record; CSV export. Pathway-neutral, so the BCaBA log can be mapped from the same rows
-- **Service-hour periods**: hours can be entered for a date range (e.g. a pay period), split into the months they cover. Each supervisor **reviews** the shared record separately; the record shows per supervisor reviewed / pending
+- **Service-hour periods**: hours can be entered for a date range (e.g. a pay period), split into the months they cover. Each supervisor **reviews** the shared record separately, after a confirmation showing the month, hours, attestation date and any correction; the record shows per supervisor reviewed / pending
+- **Future-dated sessions**: a session can't be completed before its date (organization time zone; save it as a draft instead), and a future-dated completed record never counts toward requirements before its date
+- **Overall picture**: other agencies are listed separately as service-hours contributors and supervision-only contributors
 - **External supervision**: supervision held outside AKEVRA can be recorded per month; an organization can require it before a month is closed (Settings → *Require external reporting*)
 - **Supervision Audit** is available to Administrators / Clinical Directors for any supervisee, and to a supervisee for **their own** audit (*My Ongoing Supervision Audit*). From/To month range; months before the first relationship are not flagged
 - **Notifications**: in-app bell plus email for scheduling, preparation, assignments, hours, sessions and assessments. Preparation reminders (one per session within 48 h without preparation) run automatically when the bell polls (at most every 2 minutes per organization); `python manage.py send_preparation_reminders` can also be scheduled hourly
@@ -81,7 +83,9 @@ This repository covers:
 
 - Supervisor rates a competency from the current development plan (`assessment.manage`)
 - Flow: **Draft → Ready for Review → Official**. Review needs a rating; Official needs documented evidence. It can be returned from review to draft
-- An Official assessment is locked — it can no longer be edited
+- An Official assessment is locked — it can no longer be edited. The UI shows it as **Finalized**
+- One unfinished (draft / in review) assessment per competency, date and goal; repeated Save Draft clicks don't create copies
+- Summary counts follow the four-level scale: Needs Training, Developing, Performs With Support, Independent
 - Supervisee sees Official assessments only (`assessment.view`); drafts and assessments under review are hidden
 
 Browse every endpoint in **Swagger**: http://127.0.0.1:8000/api/docs/
