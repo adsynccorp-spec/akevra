@@ -49,7 +49,7 @@ def _closed_months_for_supervisee(supervisee_id, year, month):
 # ---------------------------------------------------------------------------
 
 def record_service_hours(relationship, actor, *, year, month, hours, zero_reason="", notes="", supporting_reference="",
-                         scope="internal", external_organization=""):
+                         scope="internal", external_organization="", correction_reason=""):
     """The supervisee states their service hours for a month (0 needs a reason): for this
     organization (`internal`) or self-reported for another agency (`external`, named). Replaces the
     active record for that source by superseding it, so the original stays on file."""
@@ -96,6 +96,9 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
                 value, zero_reason or "", notes or "", supporting_reference or ""):
             # Re-saving the same entry would only reset the supervisors' reviews
             raise ValidationError("Nothing has changed, so the attestation wasn't resubmitted and existing reviews were kept.")
+        correction_reason = (correction_reason or "").strip()
+        if previous is not None and not correction_reason:
+            raise ValidationError("Give a reason for the correction. It is kept with the earlier attestation in the history.")
         if previous is not None:
             previous.record_status = "superseded"
             previous.save(update_fields=["record_status", "updated_at"])
@@ -113,6 +116,7 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
             source_type=ServiceHoursSource.SELF_ATTESTED,
             entered_by=actor,
             supersedes=previous,
+            correction_reason=correction_reason if previous is not None else "",
         )
         record.save()
     return record
@@ -162,6 +166,7 @@ def record_service_period(relationship, actor, *, start_date, end_date, hours, z
             relationship, actor, year=start_date.year, month=start_date.month, hours=str(total),
             zero_reason=(zero_reason or "no_services_scheduled") if total == 0 else "",
             notes=f"Includes {start_date:%b %d}–{end_date:%b %d}: {value} h" + (f" ({notes})" if notes else ""),
+            correction_reason=f"Hours added for {start_date:%b %d}–{end_date:%b %d}",
         )
         # Earlier periods of the month now belong to the new record
         ServiceHoursPeriodEntry.objects.filter(record__supervisee_id=relationship.supervisee_id, record__year=start_date.year,
@@ -259,6 +264,7 @@ def serialize_service_hours(record):
         "review_status": review_status(record),
         "periods": [serialize_period(p) for p in record.period_entries.filter(record_status="active").select_related("entered_by")],
         "supersedes_id": str(record.supersedes_id) if record.supersedes_id else None,
+        "correction_reason": record.correction_reason,
         # Kept so the existing UI keeps working
         "attested_by": name(record.entered_by),
         "attested_on": timezone.localtime(record.created_at).date().isoformat(),

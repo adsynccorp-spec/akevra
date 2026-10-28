@@ -65,7 +65,7 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual(ServiceHoursRecord.objects.filter(supervisee=self.alex, year=2026, month=8, record_status="active").count(), 1)
 
         # Attesting through the other relationship corrects the same record; the original is kept
-        self.assertEqual(self.attest(alex, 8, "120", rel=self.second, supporting_reference="Timesheet #42").status_code, 200)
+        self.assertEqual(self.attest(alex, 8, "120", rel=self.second, supporting_reference="Timesheet #42", correction_reason="Missed a timesheet").status_code, 200)
         history = jordan.get(f"/api/v1/supervisees/{self.alex.id}/service-hours").data["records"]
         august = [r for r in history if r["month"] == 8]
         self.assertEqual([(r["hours"], r["status"]) for r in august], [(120.0, "active"), (100.0, "superseded")])
@@ -116,7 +116,7 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual(reopened["status"], "open")
         self.assertEqual([e["to_status"] for e in reopened["status_history"]], ["ready_for_review", "closed", "open"])
         self.assertEqual(reopened["status_history"][-1]["reason"], "Late timesheet correction")
-        self.assertEqual(self.attest(alex, 6, "50").status_code, 200)
+        self.assertEqual(self.attest(alex, 6, "50", correction_reason="Payroll corrected").status_code, 200)
 
         # The current month can't be closed
         this_month = jordan.post(f"/api/v1/relationships/{self.rbt.id}/cycles", {"year": date.today().year, "month": date.today().month}, format="json")
@@ -182,7 +182,11 @@ class ReportingPeriodTests(TestCase):
         records = jordan.get(f"/api/v1/supervisees/{self.alex.id}/service-hours").data["records"]
         self.assertEqual([(r["id"], len(r["reviews"])) for r in records if r["status"] == "active"], [(record["id"], 1)])
         # A real change (notes included) is still a correction that needs a new review
-        changed = self.attest(alex, 8, "105", notes="Timesheet v2").data
+        no_reason = self.attest(alex, 8, "105", notes="Timesheet v2")
+        self.assertEqual(no_reason.status_code, 400)
+        self.assertIn("reason", str(no_reason.data))
+        changed = self.attest(alex, 8, "105", notes="Timesheet v2", correction_reason="Added the timesheet ID").data
+        self.assertEqual(changed["correction_reason"], "Added the timesheet ID")
         self.assertEqual((changed["supersedes_id"], changed["reviews"]), (record["id"], []))
         self.assertEqual(current["service_hours"], 105.0)
 

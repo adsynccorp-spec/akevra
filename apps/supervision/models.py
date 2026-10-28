@@ -1163,6 +1163,8 @@ class ServiceHoursRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel
     reviewed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     reviewed_at = models.DateTimeField(null=True, blank=True)
     supersedes = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="corrections")
+    # Why the earlier record was corrected (blank on a first attestation)
+    correction_reason = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "service_hours_record"

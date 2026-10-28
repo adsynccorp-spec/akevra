@@ -536,11 +536,11 @@ def add_note(relationship, actor, body):
 
 
 def attest_service_hours(relationship, actor, *, year, month, hours, notes="", zero_reason="", supporting_reference="",
-                         scope="internal", external_organization=""):
+                         scope="internal", external_organization="", correction_reason=""):
     """The supervisee's monthly service hours by source (see periods.record_service_hours)."""
     return record_service_hours(relationship, actor, year=year, month=month, hours=hours, notes=notes,
                                 zero_reason=zero_reason, supporting_reference=supporting_reference,
-                                scope=scope, external_organization=external_organization)
+                                scope=scope, external_organization=external_organization, correction_reason=correction_reason)
 
 
 # ---------------------------------------------------------------------------

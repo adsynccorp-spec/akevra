@@ -252,6 +252,7 @@ class ServiceHoursSerializer(serializers.Serializer):
                                     help_text="internal = hours for this organization; external = self-reported hours at another agency; "
                                               "external_none = confirm no other agency this month")
     external_organization = serializers.CharField(required=False, allow_blank=True, max_length=200, help_text="Required for external hours")
+    correction_reason = serializers.CharField(required=False, allow_blank=True, help_text="Required when correcting an existing record")
 
 
 class ExternalSupervisionSerializer(serializers.Serializer):
