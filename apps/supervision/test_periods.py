@@ -216,6 +216,38 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual(overall["external_service_agencies"], ["Bright Path ABA"])
         self.assertEqual(overall["external_supervision_agencies"], ["Harbor ABA"])
 
+    def test_flag_external_supervision_as_incorrect(self):
+        """An authorized user flags an incorrect external supervision entry with a reason: the original is
+        kept (who, when, why) and it leaves the All Agencies summary and the Supervision Audit totals."""
+        jordan, alex, casey = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test"), self.as_user("casey@akevra.test")
+        self.attest(alex, 8, "100")
+        url = f"/api/v1/supervisees/{self.alex.id}/external-supervision"
+        wrong = alex.post(url, {"occurred_on": "2026-08-12", "duration_minutes": 600, "supervisor_name": "Dana Lee",
+                                "organization_name": "Bright Path ABA"}, format="json").data
+        self.assertEqual(self.month(jordan, self.rbt, 8)["overall"]["external_supervision_hours"], 10.0)
+
+        void = f"/api/v1/external-supervision/{wrong['id']}/void"
+        self.assertEqual(casey.post(void, {"reason": "Typo"}, format="json").status_code, 403)
+        self.assertEqual(jordan.post(void, {}, format="json").status_code, 400)  # reason required
+        flagged = jordan.post(void, {"reason": "Entered 600 minutes instead of 60"}, format="json")
+        self.assertEqual(flagged.status_code, 200, flagged.data)
+        self.assertEqual((flagged.data["status"], flagged.data["void_reason"], flagged.data["voided_by"]["name"]),
+                         ("excluded", "Entered 600 minutes instead of 60", self.jordan.full_name))
+        self.assertEqual(jordan.post(void, {"reason": "Again"}, format="json").status_code, 400)
+
+        # Excluded from totals, kept on file; the correct entry is added as new
+        alex.post(url, {"occurred_on": "2026-08-12", "duration_minutes": 60, "supervisor_name": "Dana Lee",
+                        "organization_name": "Bright Path ABA"}, format="json")
+        overall = self.month(jordan, self.rbt, 8)["overall"]
+        self.assertEqual(overall["external_supervision_hours"], 1.0)
+        listed = jordan.get(url).data
+        self.assertEqual([r["duration_minutes"] for r in listed["records"]], [60])
+        self.assertEqual([(r["id"], r["status"]) for r in listed["excluded"]], [(wrong["id"], "excluded")])
+        audit = jordan.get(f"/api/v1/supervisees/{self.alex.id}/audit-log", {"start": "2026-08", "end": "2026-08"}).data
+        row = next(r for r in audit["rows"] if r["month"] == 8)
+        self.assertEqual(row["external_supervision_hours"], 1.0)
+        self.assertEqual([e["reason"] for e in row["trace"]["external_supervision_excluded"]], ["Entered 600 minutes instead of 60"])
+
     def test_internal_and_external_sources(self):
         """Another agency's hours and supervision are kept, attributed to their source, in one
         supervisee-month picture — without changing what this organization is responsible for."""

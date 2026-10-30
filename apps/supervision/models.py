@@ -1224,6 +1224,10 @@ class ExternalSupervisionRecord(UUIDPrimaryKeyModel, TimestampedModel, SoftArchi
     entered_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="+")
     reviewed_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    # Flagged as incorrect: kept on file (record_status "archived") but excluded from every total
+    voided_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "external_supervision_record"

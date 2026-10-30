@@ -187,6 +187,15 @@ def build(supervisee, *, pathway, start_year, start_month, months=12):
                      "entered_by": e.entered_by.full_name}
                     for e in outside
                 ],
+                # Flagged as incorrect: kept for the trail, excluded from every total above
+                "external_supervision_excluded": [
+                    {"id": str(e.id), "date": e.occurred_on.isoformat(), "minutes": e.duration_minutes, "supervisor": e.supervisor_name,
+                     "organization": e.organization_name, "entered_by": e.entered_by.full_name,
+                     "excluded_by": e.voided_by.full_name if e.voided_by_id else None,
+                     "excluded_at": e.voided_at.isoformat(), "reason": e.void_reason}
+                    for e in ExternalSupervisionRecord.objects.filter(supervisee=supervisee, year=year, month=month, voided_at__isnull=False)
+                    .select_related("entered_by", "voided_by")
+                ],
             },
         })
     return {

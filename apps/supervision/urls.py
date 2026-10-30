@@ -82,6 +82,7 @@ urlpatterns = [
     path("supervisees/<uuid:pk>/service-hours", pv.SuperviseeServiceHoursView.as_view(), name="supervisee-service-hours"),
     path("relationships/<uuid:pk>/service-hours/periods", pv.ServiceHoursPeriodView.as_view(), name="relationship-service-hours-periods"),
     path("supervisees/<uuid:pk>/external-supervision", pv.ExternalSupervisionView.as_view(), name="supervisee-external-supervision"),
+    path("external-supervision/<uuid:pk>/void", pv.ExternalSupervisionVoidView.as_view(), name="external-supervision-void"),
     path("service-hours/<uuid:pk>/review", pv.ServiceHoursReviewView.as_view(), name="service-hours-review"),
     path("supervisees/<uuid:pk>/coordinators", pv.CoordinatorListView.as_view(), name="supervisee-coordinators"),
     path("coordinators/<uuid:pk>", pv.CoordinatorDetailView.as_view(), name="coordinator-detail"),

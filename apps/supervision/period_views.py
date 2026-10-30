@@ -1,5 +1,6 @@
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse
+from django.db.models import Q
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -302,8 +303,13 @@ class ExternalSupervisionView(APIView):
             return _not_found()
         if not can_view:
             return _forbidden()
-        rows = ExternalSupervisionRecord.objects.filter(supervisee=supervisee, record_status="active").select_related("entered_by", "reviewed_by").order_by("-occurred_on")
-        return Response({"records": [periods.serialize_external_supervision(r) for r in rows]})
+        rows = ExternalSupervisionRecord.objects.filter(supervisee=supervisee).filter(
+            Q(record_status="active") | Q(voided_at__isnull=False)).select_related("entered_by", "reviewed_by", "voided_by").order_by("-occurred_on")
+        return Response({
+            "records": [periods.serialize_external_supervision(r) for r in rows if r.record_status == "active"],
+            # Flagged as incorrect: kept on file, excluded from every total
+            "excluded": [periods.serialize_external_supervision(r) for r in rows if r.voided_at],
+        })
 
     @extend_schema(tags=["Monthly Work"], summary="Report supervision received at another agency", request=ExternalSupervisionSerializer, operation_id="external_supervision_create", responses=JSON_RESPONSE)
     def post(self, request, pk):
@@ -321,6 +327,28 @@ class ExternalSupervisionView(APIView):
             return _bad_request(exc)
         write_audit(action="external_supervision.record", entity_type="external_supervision_record", entity_id=row.id, request=request)
         return Response(periods.serialize_external_supervision(row), status=status.HTTP_201_CREATED)
+
+
+class ExternalSupervisionVoidView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Monthly Work"], summary="Flag an external supervision entry as incorrect (kept, excluded from totals)",
+                   request=None, operation_id="external_supervision_void", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        row = ExternalSupervisionRecord.objects.select_related("supervisee", "entered_by").filter(pk=pk).first()
+        if row is None:
+            return _not_found()
+        _, _, can_manage = _supervisee_access(request, row.supervisee_id)
+        if not (can_manage or request.user_account.id == row.supervisee_id):
+            return _forbidden()
+        before = periods.serialize_external_supervision(row)
+        try:
+            periods.void_external_supervision(row, request.user_account, request.data.get("reason"))
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="external_supervision.void", entity_type="external_supervision_record", entity_id=row.id,
+                    request=request, before=before, after=periods.serialize_external_supervision(row))
+        return Response(periods.serialize_external_supervision(row))
 
 
 class ServiceHoursPeriodView(APIView):

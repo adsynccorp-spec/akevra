@@ -74,6 +74,7 @@ This repository covers:
 - Forms name each missing required field instead of silently disabling Save
 - **Overall picture**: other agencies are listed separately as service-hours contributors and supervision-only contributors
 - **External supervision**: supervision held outside AKEVRA can be recorded per month; an organization can require it before a month is closed (Settings → *Require external reporting*)
+- **Flag external supervision as incorrect**: the supervisee, their supervisor, an Administrator or a Clinical Director gives a reason; the entry is kept (marked Excluded with who, when and why, also in the audit trace) and leaves the All Agencies summary and the Supervision Audit totals. The correct entry is added as new. Closed months must be reopened first (`POST /external-supervision/{id}/void`)
 - **Supervision Audit** is available to Administrators / Clinical Directors for any supervisee, and to a supervisee for **their own** audit (*My Ongoing Supervision Audit*). From/To month range; months before the first relationship are not flagged
 - **Notifications**: in-app bell plus email for scheduling, preparation, assignments, hours, sessions and assessments. Preparation reminders (one per session within 48 h without preparation) run automatically when the bell polls (at most every 2 minutes per organization); `python manage.py send_preparation_reminders` can also be scheduled hourly
 

@@ -391,6 +391,23 @@ def record_external_supervision(supervisee, actor, *, occurred_on, duration_minu
     )
 
 
+def void_external_supervision(row, actor, reason):
+    """Flag an external supervision entry as incorrect. The entry is kept with who flagged it, when and
+    why, and leaves the All Agencies summary and the Supervision Audit; a correct entry is added as new."""
+    reason = (reason or "").strip()
+    if row.record_status != "active":
+        raise ValidationError("This entry has already been flagged as incorrect.")
+    if not reason:
+        raise ValidationError("Give a reason for flagging this entry as incorrect.")
+    if _closed_months_for_supervisee(row.supervisee_id, row.year, row.month).exists():
+        raise ValidationError(f"{date(row.year, row.month, 1):%B %Y} is verified and closed. Reopen the month to flag an entry.")
+    now = timezone.now()
+    row.record_status, row.archived_at = "archived", now
+    row.voided_by, row.voided_at, row.void_reason = actor, now, reason
+    row.save(update_fields=["record_status", "archived_at", "voided_by", "voided_at", "void_reason", "updated_at"])
+    return row
+
+
 def serialize_external_supervision(row):
     return {
         "id": str(row.id),
@@ -407,4 +424,8 @@ def serialize_external_supervision(row):
         "entered_by": {"id": str(row.entered_by_id), "name": row.entered_by.full_name},
         "entered_at": row.created_at.isoformat(),
         "reviewed_by": {"id": str(row.reviewed_by_id), "name": row.reviewed_by.full_name} if row.reviewed_by_id else None,
+        "status": "excluded" if row.voided_at else "active",
+        "voided_by": {"id": str(row.voided_by_id), "name": row.voided_by.full_name} if row.voided_by_id else None,
+        "voided_at": row.voided_at.isoformat() if row.voided_at else None,
+        "void_reason": row.void_reason,
     }
