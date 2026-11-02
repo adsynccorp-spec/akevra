@@ -1,12 +1,16 @@
 from datetime import date
 
 from django.core.management import call_command
+from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.accounts.models import UserAccount
 from apps.core.tests import PASSWORD
-from apps.supervision.models import ServiceHoursRecord, SupervisionTrack, SupervisoryRelationship
+from apps.organizations.models import Organization
+from apps.supervision.compliance import cycle_compliance
+from apps.supervision.models import MonthlyCycle, ServiceHoursRecord, SupervisionTrack, SupervisoryRelationship
+from apps.supervision.services import create_development_plan
 
 
 class ReportingPeriodTests(TestCase):
@@ -86,6 +90,70 @@ class ReportingPeriodTests(TestCase):
         self.assertEqual(self.attest(alex, 7, "0", zero_reason="service_hold").status_code, 200)
         july = self.month(jordan, self.rbt, 7)
         self.assertEqual((july["status"], july["service_hours_record"]["zero_reason"]), ("no_service_hours", "service_hold"))
+
+    def test_closed_month_keeps_its_snapshot_when_rules_change(self):
+        """A later rule approval changes neither the closed month's result nor its rule version or history."""
+        jordan, alex = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test")
+        self.attest(alex, 6, "40")
+        self.session(jordan, self.rbt, "2026-06-10", 120, client_observation=True)
+        cycle = next(c for c in jordan.get(f"/api/v1/relationships/{self.rbt.id}/cycles").data["cycles"] if c["month"] == 6)
+        closed = jordan.post(f"/api/v1/cycles/{cycle['id']}/status", {"status": "closed"}, format="json").data["compliance"]
+        self.assertEqual(closed["required_supervision_percent"], 5.0)
+
+        admin = self.as_user("settings.admin@akevra.test")
+        approved = admin.post("/api/v1/compliance-rules/approve", {
+            "track": "rbt_ongoing_supervision", "effective_from": "2026-01-01", "overrides": {"current": {"min_supervision_percent": "10"}},
+        }, format="json")
+        self.assertEqual(approved.status_code, 201, approved.data)
+
+        # The stored month is unchanged, field for field
+        month = self.month(jordan, self.rbt, 6)
+        self.assertEqual({k: month[k] for k in closed}, closed)
+        self.assertEqual(month["required_supervision_percent"], 5.0)
+        self.assertEqual([e["to_status"] for e in jordan.get(f"/api/v1/cycles/{cycle['id']}").data["status_history"]], ["closed"])
+        # A fresh calculation does use the new rule, so the snapshot is what kept the original
+        stored = MonthlyCycle.objects.get(pk=cycle["id"])
+        self.assertEqual(cycle_compliance(stored, live=True)["required_supervision_percent"], 10.0)
+
+    def test_supervision_records_are_isolated_at_database_and_api(self):
+        """Newer supervision, competency and external-activity tables are hidden from another organization by
+        row-level security itself (no application filter in these queries), and through the API."""
+        jordan, alex = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test")
+        record = self.attest(alex, 8, "100").data
+        session = self.session(jordan, self.rbt, "2026-08-04", 60)
+        external = alex.post(f"/api/v1/supervisees/{self.alex.id}/external-supervision",
+                             {"occurred_on": "2026-08-12", "duration_minutes": 60, "supervisor_name": "Dana Lee", "organization_name": "Bright Path ABA"},
+                             format="json").data
+        start = "2026-08-20T15:00:00Z"
+        appointment = jordan.post(f"/api/v1/relationships/{self.rbt.id}/appointments",
+                                  {"starts_at": start, "ends_at": "2026-08-20T16:00:00Z"}, format="json").data["appointments"][0]
+        plan = create_development_plan(organization=self.rbt.organization, relationship=self.rbt, competencies=[{"name": "Data collection"}])
+        assessment = jordan.post(f"/api/v1/relationships/{self.rbt.id}/assessments",
+                                 {"plan_competency_id": str(plan.competencies.first().id)}, format="json").data
+        rows = {"service_hours_record": record["id"], "supervision_session": session["id"], "external_supervision_record": external["id"],
+                "appointment": appointment["id"], "competency_assessment": assessment["id"]}
+
+        def visible_to(organization):
+            found = {}
+            with connection.cursor() as cursor:
+                cursor.execute("SET ROLE akevra_app")
+                cursor.execute("SELECT set_config('app.rls_bypass', 'off', false)")
+                cursor.execute("SELECT set_config('app.current_organization_id', %s, false)", [str(organization.id)])
+                for table, pk in rows.items():
+                    cursor.execute(f"SELECT count(*) FROM {table} WHERE id = %s", [pk])
+                    found[table] = cursor.fetchone()[0]
+                cursor.execute("RESET ROLE")
+            return found
+
+        self.assertEqual(set(visible_to(self.rbt.organization).values()), {1})
+        self.assertEqual(set(visible_to(Organization.objects.get(slug="summit-behavioral")).values()), {0})
+
+        outsider = self.as_user("summit.supervisor@akevra.test")
+        for url in (f"/api/v1/relationships/{self.rbt.id}", f"/api/v1/relationships/{self.rbt.id}/sessions",
+                    f"/api/v1/relationships/{self.rbt.id}/compliance", f"/api/v1/relationships/{self.rbt.id}/assessments",
+                    f"/api/v1/supervisees/{self.alex.id}/service-hours", f"/api/v1/supervisees/{self.alex.id}/external-supervision",
+                    f"/api/v1/supervisees/{self.alex.id}/audit-log", f"/api/v1/assessments/{assessment['id']}"):
+            self.assertEqual(outsider.get(url).status_code, 404, url)
 
     def test_period_status_snapshot_and_reopen(self):
         jordan, alex = self.as_user("jordan@akevra.test"), self.as_user("alex@akevra.test")
