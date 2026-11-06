@@ -121,7 +121,7 @@ class InvitationListView(APIView):
 
     @extend_schema(tags=["Invitations"], summary="List this organization's invitations", responses=JSON_RESPONSE)
     def get(self, request):
-        invitations = Invitation.objects.filter(organization=request.organization).select_related("invited_by")
+        invitations = Invitation.objects.filter(organization=request.organization).select_related("invited_by", "accepted_user_account")
         return Response([inv.serialize_invitation(i) for i in invitations])
 
     @extend_schema(
@@ -168,3 +168,29 @@ class InvitationActionView(APIView):
         except inv.InvitationError as exc:
             return _error(str(exc), 400)
         return Response(inv.serialize_invitation(invitation))
+
+
+class MemberCredentialView(APIView):
+    """An Administrator records or corrects a member's credential (the source of truth for which
+    pathways they may use). Existing relationships are not changed; each change is audited."""
+
+    permission_classes = [IsUserManager]
+
+    @extend_schema(tags=["Invitations"], summary="Set a member's credential", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        from apps.accounts.models import CredentialType, UserAccount
+        from apps.audit.services import write_audit
+
+        account = UserAccount.objects.filter(organization=request.organization, pk=pk).first()
+        if account is None:
+            return _error("Not found.", 404)
+        credential = request.data.get("credential_type") or ""
+        if credential not in ("", *CredentialType.values):
+            return _error("Unknown credential type.", 400)
+        before = account.credential_type
+        if before != credential:
+            account.credential_type = credential
+            account.save(update_fields=["credential_type", "updated_at"])
+            write_audit(action="user.credential_changed", entity_type="user_account", entity_id=account.id, request=request,
+                        before={"credential_type": before}, after={"credential_type": credential})
+        return Response({"id": str(account.id), "credential_type": account.credential_type})

@@ -27,6 +27,8 @@ class SupervisionTrack(models.TextChoices):
         "bcba_professional_development",
         "BCBA Professional Development",
     )
+    # Behavior Technician development: organizational training, separate from BACB-regulated RBT supervision
+    BT_DEVELOPMENT = "bt_development", "BT Development"
 
 
 # Pathways each supervisee credential may use; the profile credential is the source of truth.
@@ -36,8 +38,13 @@ ELIGIBLE_TRACKS = {
     CredentialType.BCABA: [SupervisionTrack.BCABA_ONGOING, SupervisionTrack.SUPERVISED_FIELDWORK],
     CredentialType.RBT: [SupervisionTrack.RBT_ONGOING, SupervisionTrack.SUPERVISED_FIELDWORK],
     CredentialType.STUDENT_ANALYST: [SupervisionTrack.SUPERVISED_FIELDWORK],
-    "": [SupervisionTrack.SUPERVISED_FIELDWORK],
+    CredentialType.BT: [SupervisionTrack.BT_DEVELOPMENT],
+    # No credential on the profile: no pathway until one is recorded (a trainee is a Student Analyst)
+    "": [],
 }
+
+# Development pathways: tracked for growth, never for BACB compliance
+DEVELOPMENT_TRACKS = frozenset({"bcba_professional_development", "bt_development"})
 
 
 def eligible_tracks(credential_type):
@@ -228,9 +235,19 @@ class SupervisoryRelationship(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
             raise ValidationError("Prior service hours can't be negative.")
 
     def _clean_pathway_eligibility(self):
+        # Checked when the pathway or supervisee is set; records created under earlier rules stay editable
+        if not self._state.adding:
+            before = type(self).objects.filter(pk=self.pk).values("supervision_track", "supervisee_id").first()
+            if before == {"supervision_track": self.supervision_track, "supervisee_id": self.supervisee_id}:
+                return
         allowed = eligible_tracks(self.supervisee.credential_type)
         if self.supervision_track not in allowed:
-            credential = CredentialType(self.supervisee.credential_type).label if self.supervisee.credential_type else "no credential"
+            if not allowed:
+                raise ValidationError(
+                    "This person has no credential on their profile, so no pathway is available. "
+                    "Record their credential first (e.g. Student Analyst for Supervised Fieldwork, or BT)."
+                )
+            credential = CredentialType(self.supervisee.credential_type).label
             names = " or ".join(SupervisionTrack(track).label for track in allowed)
             raise ValidationError(
                 f"A supervisee with {credential} on their profile can only use {names}."
@@ -897,6 +914,38 @@ class AppointmentEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, 
     class Meta:
         db_table = "appointment_event"
         ordering = ["created_at"]
+
+
+class Weekday(models.IntegerChoices):
+    MONDAY = 0, "Monday"
+    TUESDAY = 1, "Tuesday"
+    WEDNESDAY = 2, "Wednesday"
+    THURSDAY = 3, "Thursday"
+    FRIDAY = 4, "Friday"
+    SATURDAY = 5, "Saturday"
+    SUNDAY = 6, "Sunday"
+
+
+class AvailabilitySlot(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A weekly window when a Supervisor / Development Lead can be booked, in the organization's time
+    zone. Logistics only. Participants who schedule their own consultations must pick a time inside one."""
+
+    owner = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, related_name="availability_slots")
+    weekday = models.PositiveSmallIntegerField(choices=Weekday.choices)
+    starts_at = models.TimeField()
+    ends_at = models.TimeField()
+
+    class Meta:
+        db_table = "availability_slot"
+        ordering = ["weekday", "starts_at"]
+
+    def clean(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValidationError("An available time must end after it starts.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class PreSupervisionNote(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):

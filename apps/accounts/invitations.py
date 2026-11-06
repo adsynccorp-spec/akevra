@@ -72,6 +72,10 @@ def _expiry():
     return timezone.now() + timedelta(hours=settings.INVITATION_TTL_HOURS)
 
 
+def _inviter_name(invitation):
+    return invitation.invited_by.full_name if invitation.invited_by_id else "AKEVRA"
+
+
 def activation_url(raw_token):
     return f"{settings.FRONTEND_URL.rstrip('/')}/activate/{raw_token}"
 
@@ -100,7 +104,9 @@ def serialize_invitation(invitation, raw_token=None):
         "expires_at": invitation.expires_at.isoformat(),
         "created_at": invitation.created_at.isoformat(),
         "accepted_at": invitation.accepted_at.isoformat() if invitation.accepted_at else None,
-        "invited_by": invitation.invited_by.full_name,
+        "invited_by": _inviter_name(invitation),
+        "user_account_id": str(invitation.accepted_user_account_id) if invitation.accepted_user_account_id else None,
+        "current_credential_type": invitation.accepted_user_account.credential_type if invitation.accepted_user_account_id else None,
     }
     if raw_token:
         data["activation_url"] = activation_url(raw_token)
@@ -119,7 +125,7 @@ def serialize_public(invitation):
         "state": invitation.state,
         "expires_at": invitation.expires_at.isoformat(),
         "ttl_hours": settings.INVITATION_TTL_HOURS,
-        "invited_by": {"name": invitation.invited_by.full_name, "email": invitation.invited_by.email},
+        "invited_by": {"name": _inviter_name(invitation), "email": invitation.invited_by.email if invitation.invited_by_id else ""},
         # An existing login keeps its password and authenticator (DEC-062)
         "existing_account": identity is not None,
     }
@@ -133,7 +139,7 @@ def _send_email(invitation, raw_token):
     sent, error = send_email(
         subject=f"You've been invited to join {invitation.organization.name} on AKEVRA",
         message=(
-            f"{invitation.invited_by.full_name} has invited you to join "
+            f"{_inviter_name(invitation)} has invited you to join "
             f"{invitation.organization.name} on AKEVRA.\n\n"
             f"Activate your account: {activation_url(raw_token)}\n\n"
             f"This link expires in {settings.INVITATION_TTL_HOURS} hours."

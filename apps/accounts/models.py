@@ -23,6 +23,8 @@ class CredentialType(models.TextChoices):
     BCABA = "bcaba", "BCaBA"
     RBT = "rbt", "RBT"
     STUDENT_ANALYST = "student_analyst", "Student Analyst"
+    # Behavior Technician: not BACB-certified, so development only (never RBT ongoing supervision)
+    BT = "bt", "BT (Behavior Technician)"
 
 
 class IdentityManager(BaseUserManager):
@@ -258,10 +260,13 @@ class Invitation(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Organi
         choices=InvitationStatus.choices,
         default=InvitationStatus.PENDING,
     )
+    # Empty only for a workspace's first Administrator, provisioned by AKEVRA (provision_workspace)
     invited_by = models.ForeignKey(
         UserAccount,
         on_delete=models.PROTECT,
         related_name="sent_invitations",
+        null=True,
+        blank=True,
     )
     accepted_user_account = models.ForeignKey(
         UserAccount,

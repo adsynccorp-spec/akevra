@@ -107,6 +107,34 @@ class WorkspaceSelectView(APIView):
         return Response(result)
 
 
+class WorkspaceSwitchView(APIView):
+    """Change workspace without signing in again (REQ-094 / UI-014). The current session ends and a
+    fresh one, already MFA-verified, is opened at the workspace step, so nothing from the first
+    workspace carries over to the next."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(tags=["Auth"], summary="Switch to another workspace", request=None, responses=JSON_RESPONSE)
+    def post(self, request):
+        from apps.accounts.models import AuthSession
+        from apps.accounts.services import accounts_for, complete_post_mfa, serialize_workspace
+
+        session = request.auth_session
+        if session is None or not session.mfa_verified or not session.workspace_selected:
+            return _error("Sign in before switching workspace.")
+        accounts = accounts_for(session.identity)
+        if len(accounts) < 2:
+            return Response({"status": "single_workspace", "organizations": [serialize_workspace(a) for a in accounts]})
+        from apps.core import rls
+
+        with rls.rls_bypass():
+            write_audit(action="workspace.switch_started", entity_type="auth_session", entity_id=session.id, request=request)
+            session.revoke()
+            fresh = AuthSession.issue(session.identity, mfa_verified=True)
+            payload = complete_post_mfa(fresh, accounts)
+        return Response(payload)
+
+
 @extend_schema(tags=["Auth"], responses=JSON_RESPONSE)
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]

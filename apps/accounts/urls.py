@@ -14,6 +14,7 @@ from apps.accounts.views import (
     MFAVerifyView,
     SessionView,
     WorkspaceSelectView,
+    WorkspaceSwitchView,
 )
 
 urlpatterns = [
@@ -21,6 +22,7 @@ urlpatterns = [
     path("mfa/verify", MFAVerifyView.as_view(), name="mfa-verify"),
     path("mfa/enroll", MFAEnrollView.as_view(), name="mfa-enroll"),
     path("workspace/select", WorkspaceSelectView.as_view(), name="workspace-select"),
+    path("workspace/switch", WorkspaceSwitchView.as_view(), name="workspace-switch"),
     path("logout", LogoutView.as_view(), name="logout"),
     path("session", SessionView.as_view(), name="session"),
     path("me", MeView.as_view(), name="me"),

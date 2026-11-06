@@ -6,6 +6,7 @@ from apps.supervision import assessment_views as av
 from apps.supervision import notification_views as nv
 from apps.supervision import period_views as pv
 from apps.supervision import settings_views as stv
+from apps.supervision import overview_views as ov
 
 from apps.supervision.views import (
     CompetencyListView,
@@ -65,6 +66,8 @@ urlpatterns = [
     path("appointments", sv.AllAppointmentsView.as_view(), name="appointments-all"),
     path("relationships/<uuid:pk>/appointments", sv.AppointmentListView.as_view(), name="relationship-appointments"),
     path("appointments/<uuid:pk>", sv.AppointmentDetailView.as_view(), name="appointment-detail"),
+    path("availability", sv.MyAvailabilityView.as_view(), name="availability-mine"),
+    path("relationships/<uuid:pk>/availability", sv.RelationshipAvailabilityView.as_view(), name="relationship-availability"),
     path("appointments/<uuid:pk>/confirm", sv.AppointmentConfirmView.as_view(), name="appointment-confirm"),
     path("appointments/<uuid:pk>/cancel", sv.AppointmentCancelView.as_view(), name="appointment-cancel"),
     path("appointments/<uuid:pk>/complete", sv.AppointmentCompleteView.as_view(), name="appointment-complete"),
@@ -101,4 +104,10 @@ urlpatterns = [
     path("hours/<uuid:pk>/verify", mv.HoursVerifyView.as_view(), name="hours-verify"),
     path("hours/<uuid:pk>/return", mv.HoursReturnView.as_view(), name="hours-return"),
     path("hours/<uuid:pk>/observation-minutes", mv.HoursObservationMinutesView.as_view(), name="hours-observation-minutes"),
+    # Read-only overviews across my relationships (Compliance, Competencies, Reports & Audit, Settings)
+    path("compliance/overview", ov.ComplianceOverviewView.as_view(), name="compliance-overview"),
+    path("competencies/overview", ov.CompetencyOverviewView.as_view(), name="competency-overview"),
+    path("audit/activity", ov.AuditActivityView.as_view(), name="audit-activity"),
+    path("account/sessions", ov.MySessionsView.as_view(), name="account-sessions"),
+    path("account/profile", ov.MyProfileView.as_view(), name="account-profile"),
 ]

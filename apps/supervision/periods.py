@@ -92,6 +92,9 @@ def record_service_hours(relationship, actor, *, year, month, hours, zero_reason
             supervisee_id=relationship.supervisee_id, year=year, month=month, record_status="active",
             scope=scope, external_organization=external_organization,
         ).first()
+        if scope == "external_none" and previous is not None:
+            # Already confirmed for this month: confirming again changes nothing and needs no reason
+            return previous
         if previous is not None and (previous.hours, previous.zero_reason, previous.notes, previous.supporting_reference) == (
                 value, zero_reason or "", notes or "", supporting_reference or ""):
             # Re-saving the same entry would only reset the supervisors' reviews

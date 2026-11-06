@@ -100,7 +100,7 @@ class MilestoneTransitionSerializer(serializers.Serializer):
 class InvitationCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
     credential_type = serializers.ChoiceField(
-        choices=["", "bcba", "bcaba", "rbt", "student_analyst"], required=False
+        choices=["", "bcba", "bcaba", "rbt", "student_analyst", "bt"], required=False
     )
     org_role = serializers.ChoiceField(
         choices=["", "administrator", "clinical_director"], required=False
@@ -304,6 +304,16 @@ class AppointmentPatchSerializer(serializers.Serializer):
     location = serializers.CharField(required=False, allow_blank=True, max_length=255)
     agenda = serializers.CharField(required=False, allow_blank=True)
     reason = serializers.CharField(required=False, allow_blank=True, help_text="Why it was rescheduled")
+
+
+class AvailabilitySlotSerializer(serializers.Serializer):
+    weekday = serializers.IntegerField(min_value=0, max_value=6, help_text="0 = Monday … 6 = Sunday")
+    starts_at = serializers.TimeField()
+    ends_at = serializers.TimeField()
+
+
+class AvailabilitySerializer(serializers.Serializer):
+    slots = AvailabilitySlotSerializer(many=True)
 
 
 class AppointmentCancelSerializer(serializers.Serializer):

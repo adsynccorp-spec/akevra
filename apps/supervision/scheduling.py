@@ -8,15 +8,18 @@ import uuid
 from datetime import timedelta
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from apps.supervision.models import (
     Appointment,
     AppointmentEvent,
     AppointmentStatus,
+    AvailabilitySlot,
     PreSupervisionNote,
     PreSupervisionNoteRevision,
+    SupervisionTrack,
+    Weekday,
 )
 
 MAX_BATCH = 26  # half a year of weekly appointments
@@ -38,6 +41,109 @@ def _event(appointment, actor, action, *, previous=None, reason=""):
     )
 
 
+# ---------------------------------------------------------------------------
+# Wording, self-scheduling, conflicts and available times
+# ---------------------------------------------------------------------------
+
+# BCBA Professional Development is consultation between BCBAs, not regulatory supervision
+SESSION_TYPE_LABELS = {"individual": "Individual Supervision", "group": "Group Supervision"}
+CONSULTATION_TYPE_LABELS = {"individual": "Individual Consultation", "group": "Group Consultation"}
+
+
+def session_type_label(session_type, track):
+    labels = CONSULTATION_TYPE_LABELS if track == SupervisionTrack.BCBA_PROFESSIONAL_DEVELOPMENT else SESSION_TYPE_LABELS
+    return labels.get(session_type, session_type)
+
+
+def meeting_word(track):
+    return "consultation" if track == SupervisionTrack.BCBA_PROFESSIONAL_DEVELOPMENT else "supervision"
+
+
+def may_self_schedule(actor, relationship):
+    """BCBA Professional Development: the participant books their own consultations with the
+    Development Lead. Every other pathway is unchanged (the Supervisor schedules)."""
+    return (relationship.supervision_track == SupervisionTrack.BCBA_PROFESSIONAL_DEVELOPMENT
+            and actor.id == relationship.supervisee_id and relationship.status == "active")
+
+
+def _zone(organization):
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        return ZoneInfo(organization.time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.get_current_timezone()
+
+
+def _fmt(moment, organization):
+    local = timezone.localtime(moment, _zone(organization))
+    return local.strftime("%b %d, %I:%M %p").replace(" 0", " ")
+
+
+def check_conflicts(relationship, starts_at, ends_at, *, exclude=None):
+    """Nobody can be booked twice: an open appointment of either party overlapping this time is refused."""
+    people = (relationship.supervisor_id, relationship.supervisee_id)
+    clash = (Appointment.objects.filter(record_status="active", status__in=OPEN, starts_at__lt=ends_at, ends_at__gt=starts_at)
+             .filter(models.Q(relationship__supervisor_id__in=people) | models.Q(relationship__supervisee_id__in=people))
+             .select_related("relationship__supervisor", "relationship__supervisee"))
+    if exclude is not None:
+        clash = clash.exclude(pk=exclude.pk)
+    other = clash.order_by("starts_at").first()
+    if other is not None:
+        busy = [p for p in (other.relationship.supervisor, other.relationship.supervisee) if p.id in people]
+        who = " and ".join(p.full_name for p in busy)
+        raise ValidationError(
+            f"This time conflicts with another appointment for {who} "
+            f"({_fmt(other.starts_at, relationship.organization)}–{_fmt(other.ends_at, relationship.organization).split(', ')[-1]}). "
+            "Choose a different time."
+        )
+
+
+def availability_for(owner):
+    return list(AvailabilitySlot.objects.filter(owner=owner, record_status="active").order_by("weekday", "starts_at"))
+
+
+def check_available(relationship, starts_at, ends_at):
+    """A self-scheduled consultation must sit inside one of the Development Lead's available times,
+    when the Lead has published any."""
+    slots = availability_for(relationship.supervisor)
+    if not slots:
+        return
+    zone = _zone(relationship.organization)
+    start, end = timezone.localtime(starts_at, zone), timezone.localtime(ends_at, zone)
+    fits = start.date() == end.date() and any(
+        slot.weekday == start.weekday() and slot.starts_at <= start.time() and end.time() <= slot.ends_at for slot in slots
+    )
+    if not fits:
+        times = "; ".join(f"{Weekday(s.weekday).label} {s.starts_at.strftime('%I:%M %p').lstrip('0')}–{s.ends_at.strftime('%I:%M %p').lstrip('0')}"
+                          for s in slots)
+        raise ValidationError(f"{relationship.supervisor.full_name} is available at these times only: {times}.")
+
+
+def replace_availability(owner, actor, slots):
+    """Replace the owner's weekly available times. Earlier times are archived, never deleted."""
+    cleaned = []
+    for slot in slots:
+        item = AvailabilitySlot(organization=owner.organization, owner=owner, weekday=slot["weekday"],
+                                starts_at=slot["starts_at"], ends_at=slot["ends_at"])
+        item.full_clean()
+        cleaned.append(item)
+    for a in cleaned:
+        for b in cleaned:
+            if a is not b and a.weekday == b.weekday and a.starts_at < b.ends_at and b.starts_at < a.ends_at:
+                raise ValidationError(f"Two available times overlap on {Weekday(a.weekday).label}.")
+    with transaction.atomic():
+        AvailabilitySlot.objects.filter(owner=owner, record_status="active").update(record_status="archived")
+        for item in cleaned:
+            item.save()
+    return availability_for(owner)
+
+
+def serialize_slot(slot):
+    return {"id": str(slot.id), "weekday": slot.weekday, "weekday_label": Weekday(slot.weekday).label,
+            "starts_at": slot.starts_at.strftime("%H:%M"), "ends_at": slot.ends_at.strftime("%H:%M")}
+
+
 def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_weeks=0, **fields):
     """One appointment, or a weekly batch (`repeat_weeks` more after the first) sharing a series id."""
     try:
@@ -48,8 +154,13 @@ def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_wee
         raise ValidationError(f"A batch can hold at most {MAX_BATCH} appointments.")
     series = uuid.uuid4() if repeat_weeks else None
     created = []
+    self_scheduled = actor.id == relationship.supervisee_id
     with transaction.atomic():
         for week in range(repeat_weeks + 1):
+            if ends_at > starts_at:
+                check_conflicts(relationship, starts_at + timedelta(weeks=week), ends_at + timedelta(weeks=week))
+                if self_scheduled:
+                    check_available(relationship, starts_at + timedelta(weeks=week), ends_at + timedelta(weeks=week))
             appointment = Appointment(
                 organization=relationship.organization,
                 relationship=relationship,
@@ -83,6 +194,10 @@ def reschedule(appointment, actor, *, starts_at=None, ends_at=None, reason="", *
         appointment.starts_at = starts_at
     if ends_at:
         appointment.ends_at = ends_at
+    if moved and appointment.ends_at > appointment.starts_at:
+        check_conflicts(appointment.relationship, appointment.starts_at, appointment.ends_at, exclude=appointment)
+        if actor.id == appointment.relationship.supervisee_id:
+            check_available(appointment.relationship, appointment.starts_at, appointment.ends_at)
     for key, value in fields.items():
         if key in APPOINTMENT_FIELDS and value is not None:
             setattr(appointment, key, value)
@@ -262,10 +377,13 @@ def serialize_appointment(appointment, *, detail=False):
     data = {
         "id": str(appointment.id),
         "relationship_id": str(appointment.relationship_id),
+        "supervision_track": appointment.relationship.supervision_track,
         "starts_at": appointment.starts_at.isoformat(),
         "ends_at": appointment.ends_at.isoformat(),
         "status": appointment.status,
         "session_type": appointment.session_type,
+        "session_type_label": session_type_label(appointment.session_type, appointment.relationship.supervision_track),
+        "self_scheduled": appointment.created_by_id is not None and appointment.created_by_id == appointment.relationship.supervisee_id,
         "meeting_method": appointment.meeting_method,
         "location": appointment.location,
         "agenda": appointment.agenda,

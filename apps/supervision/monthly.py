@@ -643,6 +643,7 @@ def serialize_session(session):
         "end_time": session.end_time.strftime("%H:%M") if session.end_time else None,
         "duration_minutes": session.duration_minutes,
         "session_type": session.session_type,
+        "session_type_label": _type_label(session),
         "meeting_method": session.meeting_method,
         "client_observation": session.client_observation,
         "topics": session.topics,
@@ -712,3 +713,9 @@ def serialize_cycle(cycle, *, compliance=None, detail=False):
         data["sessions"] = [serialize_session(s) for s in sessions]
         data["status_history"] = serialize_events(cycle)
     return data
+
+
+def _type_label(session):
+    from apps.supervision.scheduling import session_type_label
+
+    return session_type_label(session.session_type, session.cycle.relationship.supervision_track)

@@ -12,6 +12,7 @@ from apps.core.api_serializers import (
     AppointmentCancelSerializer,
     AppointmentCreateSerializer,
     AppointmentPatchSerializer,
+    AvailabilitySerializer,
     PrepNoteSerializer,
 )
 from apps.rbac.permissions import HasWorkspace
@@ -41,11 +42,25 @@ def _appointment(pk):
     return _appointments().filter(pk=pk).first()
 
 
+def _can_manage(me, appointment, rel):
+    """The Supervisor manages every appointment; a BCBA participant also manages the consultations
+    they booked themselves."""
+    if has_permission(me, "appointment.manage", relationship=rel):
+        return True
+    return scheduling.may_self_schedule(me, rel) and appointment.created_by_id == me.id
+
+
+def _manage_denied(request, appointment, rel):
+    if _can_manage(request.user_account, appointment, rel):
+        return None
+    return _denied(request, "appointment.manage", rel, "appointment", appointment.id)
+
+
 def _with_rights(request, appointment, rel, *, detail=False):
     me = request.user_account
     return {
         **scheduling.serialize_appointment(appointment, detail=detail),
-        "can_manage": has_permission(me, "appointment.manage", relationship=rel),
+        "can_manage": _can_manage(me, appointment, rel),
         "can_confirm": has_permission(me, "appointment.confirm", relationship=rel),
         "can_prepare": has_permission(me, "prep.submit", relationship=rel),
         "can_document": has_permission(me, "session.document", relationship=rel),
@@ -63,8 +78,11 @@ class AppointmentListView(APIView):
         if denied := _denied(request, "session.view", rel, "appointment", "list"):
             return denied
         rows = _appointments().filter(relationship=rel).order_by("starts_at")
+        me = request.user_account
         return Response({
-            "can_manage": has_permission(request.user_account, "appointment.manage", relationship=rel),
+            "can_manage": has_permission(me, "appointment.manage", relationship=rel),
+            "can_schedule": has_permission(me, "appointment.manage", relationship=rel) or scheduling.may_self_schedule(me, rel),
+            "self_scheduling": scheduling.may_self_schedule(me, rel),
             "appointments": [_with_rights(request, a, rel) for a in rows],
         })
 
@@ -73,8 +91,9 @@ class AppointmentListView(APIView):
         rel = _relationship(pk)
         if rel is None:
             return _not_found()
-        if denied := _denied(request, "appointment.manage", rel, "appointment", "new"):
-            return denied
+        if not scheduling.may_self_schedule(request.user_account, rel):
+            if denied := _denied(request, "appointment.manage", rel, "appointment", "new"):
+                return denied
         serializer = AppointmentCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return _invalid(serializer)
@@ -82,9 +101,11 @@ class AppointmentListView(APIView):
             created = scheduling.schedule_appointments(rel, request.user_account, **serializer.validated_data)
         except ValidationError as exc:
             return _bad_request(exc)
+        self_scheduled = request.user_account.id == rel.supervisee_id
         for appointment in created:
             write_audit(action="appointment.schedule", entity_type="appointment", entity_id=appointment.id, request=request,
-                        after={"starts_at": appointment.starts_at.isoformat(), "series_id": str(appointment.series_id or "")})
+                        after={"starts_at": appointment.starts_at.isoformat(), "series_id": str(appointment.series_id or ""),
+                               "self_scheduled": self_scheduled})
         ordered = sorted(created, key=lambda a: a.starts_at)
         if ordered:
             scheduling.attach_waiting_prep(ordered[0])
@@ -103,7 +124,9 @@ class AllAppointmentsView(APIView):
         rows = _appointments().filter(relationship_id__in=rels).order_by("starts_at")
         return Response({
             "schedulable_relationships": [
-                _relationship_summary(rel) for rel in rels.values() if has_permission(me, "appointment.manage", relationship=rel)
+                {**_relationship_summary(rel), "self_scheduling": scheduling.may_self_schedule(me, rel)}
+                for rel in rels.values()
+                if has_permission(me, "appointment.manage", relationship=rel) or scheduling.may_self_schedule(me, rel)
             ],
             "appointments": [
                 {**_with_rights(request, a, rels[a.relationship_id]), "relationship": _relationship_summary(rels[a.relationship_id])}
@@ -131,7 +154,7 @@ class AppointmentDetailView(APIView):
         if appointment is None:
             return _not_found()
         rel = appointment.relationship
-        if denied := _denied(request, "appointment.manage", rel, "appointment", appointment.id):
+        if denied := _manage_denied(request, appointment, rel):
             return denied
         serializer = AppointmentPatchSerializer(data=request.data, partial=True)
         if not serializer.is_valid():
@@ -161,7 +184,11 @@ class _AppointmentAction(APIView):
         if appointment is None:
             return _not_found()
         rel = appointment.relationship
-        if denied := _denied(request, self.permission, rel, "appointment", appointment.id):
+        if self.permission == "appointment.manage" and self.action == "cancel":
+            denied = _manage_denied(request, appointment, rel)
+        else:
+            denied = _denied(request, self.permission, rel, "appointment", appointment.id)
+        if denied:
             return denied
         before = appointment.status
         try:
@@ -287,3 +314,44 @@ class PreparationTemplateView(APIView):
         write_audit(action="prep_note.save", entity_type="pre_supervision_note", entity_id=note.id, request=request,
                     metadata={"standalone": True, "version": note.revisions.count()})
         return Response(scheduling.serialize_prep_note(note))
+
+
+class MyAvailabilityView(APIView):
+    """My weekly available times (Supervisors / Development Leads). Participants who book their own
+    consultations can only choose a time inside one of them."""
+
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Scheduling"], summary="My weekly available times", operation_id="availability_mine", responses=JSON_RESPONSE)
+    def get(self, request):
+        return Response({"time_zone": request.user_account.organization.time_zone,
+                         "slots": [scheduling.serialize_slot(s) for s in scheduling.availability_for(request.user_account)]})
+
+    @extend_schema(tags=["Scheduling"], summary="Replace my weekly available times", request=AvailabilitySerializer, operation_id="availability_update", responses=JSON_RESPONSE)
+    def put(self, request):
+        serializer = AvailabilitySerializer(data=request.data)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        try:
+            slots = scheduling.replace_availability(request.user_account, request.user_account, serializer.validated_data["slots"])
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="availability.update", entity_type="user_account", entity_id=request.user_account.id, request=request,
+                    after={"slots": [scheduling.serialize_slot(s) for s in slots]})
+        return Response({"time_zone": request.user_account.organization.time_zone,
+                         "slots": [scheduling.serialize_slot(s) for s in slots]})
+
+
+class RelationshipAvailabilityView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Scheduling"], summary="The Supervisor / Development Lead's available times for this relationship", operation_id="relationship_availability", responses=JSON_RESPONSE)
+    def get(self, request, pk):
+        rel = _relationship(pk)
+        if rel is None:
+            return _not_found()
+        if denied := _denied(request, "session.view", rel, "availability", rel.id):
+            return denied
+        return Response({"owner": {"id": str(rel.supervisor_id), "name": rel.supervisor.full_name},
+                         "time_zone": rel.organization.time_zone,
+                         "slots": [scheduling.serialize_slot(s) for s in scheduling.availability_for(rel.supervisor)]})

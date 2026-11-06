@@ -30,6 +30,7 @@ from decimal import Decimal
 from django.db.models import Count, Q, Sum
 
 from apps.supervision.models import (
+    COMPLIANCE_BEARING_TRACKS,
     ComplianceRuleSet,
     FieldworkSubtype,
     HoursEntry,
@@ -378,7 +379,7 @@ def evaluate_fieldwork_cumulative(rules, months, *, unrestricted_hours=None, acc
 def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contacts, individual_contacts,
                            observation_contacts, group_minutes=0, first_half_minutes=None,
                            second_half_minutes=None, prior_service_hours=0, quarter_observations=None,
-                           quarter_end=False):
+                           quarter_end=False, open_halves=()):
     """One month: supervision time from Supervisor-authored sessions over the Supervisee's
     self-attested service hours. `service_hours` is None until the Supervisee attests.
     Only the checks whose parameters the rules define are applied, so RBT and BCaBA share it."""
@@ -428,13 +429,21 @@ def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contact
         checks.append(_check("group_percent", "Group supervision (maximum share of supervised time)", _out(limit),
                              _out(share), share <= limit))
     # A half passed as None isn't required (e.g. the relationship started after it ended)
-    halves = [minutes for minutes in (first_half_minutes, second_half_minutes) if minutes is not None]
+    halves = [(i, minutes) for i, minutes in enumerate((first_half_minutes, second_half_minutes)) if minutes is not None]
     if rules.has("biweekly_min_minutes") and not reduced_tier and halves:
         needed = int(rules.number("biweekly_min_minutes"))
-        least = min(halves)
+        # A half still running and not yet covered is "In Progress", not failed; an ended half short of it is "Below"
+        ended_short = [m for i, m in halves if m < needed and i not in open_halves]
+        running_short = [m for i, m in halves if m < needed and i in open_halves]
+        least = min(m for _, m in halves)
+        status = "not_met" if ended_short else ("in_progress" if running_short else "met")
+        intervals = [{"half": i + 1, "minutes": m, "status": "met" if m >= needed else ("in_progress" if i in open_halves else "not_met")}
+                     for i, m in halves]
         # BCaBA Handbook: no less than 1 hour every 2 weeks during the first 1,000 post-certification hours
-        checks.append(_check("biweekly_minutes", "At least 1 hour every 2 weeks (first 1,000 hours; minutes in each half of the month)",
-                             needed, least, least >= needed))
+        check = _check("biweekly_minutes", "At least 1 hour every 2 weeks (first 1,000 hours; minutes in each half of the month)",
+                       needed, least, not ended_short, status=status)
+        check["intervals"] = intervals
+        checks.append(check)
     if rules.has("quarterly_observations") and quarter_observations is not None:
         needed = int(rules.number("quarterly_observations"))
         # Only due by the quarter's last month; earlier months are not failed for it, but show
@@ -649,6 +658,7 @@ def _ongoing_month_for(cycle, rules):
         prior_service_hours=prior_service or 0,
         quarter_observations=quarter_observations,
         quarter_end=cycle.month % 3 == 0,
+        open_halves=_open_halves(cycle),
     )
     result["service_hours_record"] = None if record is None else {
         "id": str(record.id), "hours": _out(record.hours), "zero_reason": record.zero_reason,
@@ -691,6 +701,17 @@ def _ongoing_month_for(cycle, rules):
     return result
 
 
+def _open_halves(cycle):
+    """Which halves of the month (0 = 1st–14th, 1 = 15th–end) haven't ended yet in the organization's time zone."""
+    today = organization_today(cycle.organization)
+    month = (cycle.year, cycle.month)
+    if month < (today.year, today.month):
+        return ()
+    if month > (today.year, today.month):
+        return (0, 1)
+    return (0, 1) if today.day <= 14 else (1,)
+
+
 def rules_date(relationship, cycle, standard=None):
     """The date whose rules apply to this month. Fieldwork follows the trainee's BACB standard (by
     application date) for every month, whenever the hours were accrued."""
@@ -728,6 +749,8 @@ def cycle_compliance(cycle, *, live=False):
         else:
             params = dict(sorted(rules_by_standard[result["standard"]].values.items()))
         return {**result, "track": track, "rules": {**source, "parameters": params}}
+    if track not in COMPLIANCE_BEARING_TRACKS:
+        return {"status": "not_compliance_bearing", "met": None, "track": track}
     rules = load_rules(track, rules_date(cycle.relationship, cycle), cycle.organization_id)
     if rules is None:
         return _rules_pending(track)

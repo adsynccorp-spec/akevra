@@ -78,6 +78,18 @@ def appointments_scheduled(appointments, actor):
     first = appointments[0]
     rel = first.relationship
     more = f" (+{len(appointments) - 1} more weekly)" if len(appointments) > 1 else ""
+    from apps.supervision.scheduling import meeting_word
+
+    word = meeting_word(rel.supervision_track)
+    if actor.id == rel.supervisee_id:
+        # A BCBA participant booked their own consultation: the Development Lead is told
+        notify(
+            rel.supervisor, "appointment_scheduled", f"{actor.full_name} booked a {word} for {_when(first)}{more}",
+            body=f"{actor.full_name} scheduled a {word} with you for {_when(first)}{more}. "
+                 "You remain responsible for documenting the session afterwards.",
+            relationship=rel, tab="sessions", appointment=first, email=True,
+        )
+        return
     prep = _linked_prep(first)
     if prep is not None:
         # Preparation started earlier was attached to this session: no request to prepare again
@@ -87,8 +99,8 @@ def appointments_scheduled(appointments, actor):
     else:
         ask = "Please complete your supervision preparation before the session."
     notify(
-        rel.supervisee, "appointment_scheduled", f"Supervision scheduled for {_when(first)}{more}",
-        body=f"{actor.full_name} scheduled a supervision session for {_when(first)}{more}. {ask}",
+        rel.supervisee, "appointment_scheduled", f"{word.capitalize()} scheduled for {_when(first)}{more}",
+        body=f"{actor.full_name} scheduled a {word} session for {_when(first)}{more}. {ask}",
         relationship=rel, tab="sessions", appointment=first, email=True,
     )
     if prep is not None:
@@ -101,13 +113,16 @@ def appointments_scheduled(appointments, actor):
 
 
 def appointment_changed(appointment, actor, action):
+    from apps.supervision.scheduling import meeting_word
+
     rel = appointment.relationship
     other = rel.supervisee if actor.id == rel.supervisor_id else rel.supervisor
+    word = meeting_word(rel.supervision_track).capitalize()
     titles = {
-        "rescheduled": f"Supervision moved to {_when(appointment)}",
-        "cancelled": f"Supervision on {_when(appointment)} was cancelled",
-        "confirmed": f"Supervision on {_when(appointment)} was confirmed",
-        "no_show": f"Supervision on {_when(appointment)} was marked No-Show",
+        "rescheduled": f"{word} moved to {_when(appointment)}",
+        "cancelled": f"{word} on {_when(appointment)} was cancelled",
+        "confirmed": f"{word} on {_when(appointment)} was confirmed",
+        "no_show": f"{word} on {_when(appointment)} was marked No-Show",
     }
     if action in titles:
         notify(other, f"appointment_{action}", titles[action], body=f"By {actor.full_name}.",
