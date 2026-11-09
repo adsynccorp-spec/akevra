@@ -120,10 +120,24 @@ def approve(organization, actor, *, track, effective_from, overrides=None, note=
     now = timezone.now()
     created = []
     with transaction.atomic():
-        # Earlier approvals stay on file, superseded
-        for old in ComplianceRuleSet.objects.filter(supervision_track=track, organization=organization, record_status="active"):
+        # Earlier approvals stay on file, superseded. The part of an earlier approval that applies before
+        # the new effective date keeps governing those months: it is carried into a copy that ends the day
+        # before, so each month is still evaluated under the rules in force at its own date.
+        cutoff = effective_from - timedelta(days=1)
+        for old in ComplianceRuleSet.objects.filter(supervision_track=track, organization=organization, record_status="active").prefetch_related("parameters"):
             old.record_status = "superseded"
             old.save(update_fields=["record_status", "updated_at"])
+            if old.effective_from <= cutoff:
+                kept = ComplianceRuleSet.objects.create(
+                    name=old.name, effective_from=old.effective_from,
+                    effective_to=min(old.effective_to, cutoff) if old.effective_to else cutoff,
+                    supervision_track=track, organization=organization, approved_by=old.approved_by,
+                    approved_at=old.approved_at,
+                    approval_note=(old.approval_note + " " if old.approval_note else "") + f"(Kept for months before {effective_from:%b %d, %Y}.)",
+                )
+                for param in old.parameters.all():
+                    if param.record_status == "active":
+                        ComplianceRuleParameter.objects.create(rule_set=kept, key=param.key, value=param.value, unit=param.unit)
         versions = DEFAULT_RULES[track]
         for index, (version_start, values) in enumerate(versions):
             nxt = versions[index + 1][0] if index + 1 < len(versions) else None

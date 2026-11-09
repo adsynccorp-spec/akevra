@@ -24,6 +24,9 @@ from apps.supervision.views import (
     RelationshipListView,
 )
 
+from apps.supervision import closure_views as clv  # noqa: E402
+from apps.supervision import reminder_views as rmv  # noqa: E402
+
 urlpatterns = [
     path("dashboard/summary", DashboardSummaryView.as_view(), name="dashboard-summary"),
     path("competencies", CompetencyListView.as_view(), name="competencies"),
@@ -110,4 +113,11 @@ urlpatterns = [
     path("audit/activity", ov.AuditActivityView.as_view(), name="audit-activity"),
     path("account/sessions", ov.MySessionsView.as_view(), name="account-sessions"),
     path("account/profile", ov.MyProfileView.as_view(), name="account-profile"),
+    path("relationships/<uuid:pk>/reminders", rmv.RelationshipRemindersView.as_view(), name="relationship-reminders"),
+    path("reminders", rmv.AllRemindersView.as_view(), name="reminders-all"),
+    path("reminders/<uuid:pk>/resolve", rmv.ReminderActionView.as_view(action="resolve"), name="reminder-resolve"),
+    path("reminders/<uuid:pk>/dismiss", rmv.ReminderActionView.as_view(action="dismiss"), name="reminder-dismiss"),
+    path("relationships/<uuid:pk>/conclude", clv.ConcludeRelationshipView.as_view(), name="relationship-conclude"),
+    path("conclusion-reasons", clv.ConclusionReasonsView.as_view(), name="conclusion-reasons"),
+    path("relationships/<uuid:pk>/export", clv.RelationshipExportView.as_view(), name="relationship-export"),
 ]

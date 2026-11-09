@@ -152,6 +152,8 @@ def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_wee
         raise ValidationError("Repeat must be a whole number of weeks.") from None
     if not 0 <= repeat_weeks < MAX_BATCH:
         raise ValidationError(f"A batch can hold at most {MAX_BATCH} appointments.")
+    if relationship.status != "active":
+        raise ValidationError("This relationship is concluded, so no new appointments can be scheduled.")
     series = uuid.uuid4() if repeat_weeks else None
     created = []
     self_scheduled = actor.id == relationship.supervisee_id

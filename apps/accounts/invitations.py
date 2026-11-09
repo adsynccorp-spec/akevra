@@ -107,6 +107,7 @@ def serialize_invitation(invitation, raw_token=None):
         "invited_by": _inviter_name(invitation),
         "user_account_id": str(invitation.accepted_user_account_id) if invitation.accepted_user_account_id else None,
         "current_credential_type": invitation.accepted_user_account.credential_type if invitation.accepted_user_account_id else None,
+        "member_status": invitation.accepted_user_account.record_status if invitation.accepted_user_account_id else None,
     }
     if raw_token:
         data["activation_url"] = activation_url(raw_token)

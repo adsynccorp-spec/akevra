@@ -91,6 +91,19 @@ def _idp_denied_response(user_account, relationship):
     return Response({"detail": detail, "code": code}, status=status.HTTP_403_FORBIDDEN)
 
 
+def _conclusion(rel):
+    from apps.supervision.models import ConclusionReason, RelationshipConclusion
+
+    if rel.status == "active":
+        return None  # no query for the common case (keeps relationship lists flat)
+    c = RelationshipConclusion.objects.filter(relationship=rel).select_related("concluded_by").first()
+    if c is None:
+        return None
+    label = ConclusionReason(c.reason).label if c.reason in ConclusionReason.values else c.reason
+    return {"reason": c.reason, "reason_label": label, "concluded_on": c.concluded_on.isoformat(), "notes": c.notes,
+            "concluded_by": c.concluded_by.full_name if c.concluded_by_id else None, "recorded_at": c.created_at.isoformat()}
+
+
 def serialize_relationship(rel, viewer=None):
     data = {
         "id": str(rel.id),
@@ -113,6 +126,8 @@ def serialize_relationship(rel, viewer=None):
         "is_compliance_bearing": rel.is_compliance_bearing,
         "started_on": rel.started_on.isoformat(),
         "status": rel.status,
+        "ended_on": rel.ended_on.isoformat() if rel.ended_on else None,
+        "conclusion": _conclusion(rel),
         "fieldwork_requirements": rel.fieldwork_requirements,
         "fieldwork_standard_basis": rel.fieldwork_standard_basis,
         "fieldwork_application_year": rel.fieldwork_application_year,
@@ -156,6 +171,9 @@ def serialize_relationship(rel, viewer=None):
                 "hours.verify",
                 "service_hours.attest",
                 "clinical.view",
+                "relationship.conclude",
+                "reports.export",
+                "audit.view",
             )
         }
     return data
@@ -183,7 +201,7 @@ def _get_relationship(pk):
 def _plan_queryset():
     return DevelopmentPlan.objects.select_related(
         "relationship", "relationship__supervisor", "relationship__supervisee"
-    ).prefetch_related("goals", "competencies", "milestones")
+    ).prefetch_related("goals__ai_suggestion", "competencies", "milestones")
 
 
 class RelationshipListView(APIView):
@@ -341,7 +359,14 @@ class RelationshipDetailView(APIView):
             )
             return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
         before = serialize_relationship(rel)
-        for field in ("supervision_track", "fieldwork_subtype", "supervisee_purpose", "status", "ended_on"):
+        if rel.status != RecordStatus.ACTIVE:
+            return Response({"detail": "This relationship is concluded and stays read-only."}, status=status.HTTP_400_BAD_REQUEST)
+        status_change = "status" in request.data and (request.data["status"] or "") != rel.status
+        end_change = "ended_on" in request.data and (request.data["ended_on"] or None) != (rel.ended_on.isoformat() if rel.ended_on else None)
+        if status_change or end_change:
+            # Ending a relationship is a recorded conclusion with a reason, never a plain field edit
+            return Response({"detail": "Conclude the relationship instead (a reason is recorded)."}, status=status.HTTP_400_BAD_REQUEST)
+        for field in ("supervision_track", "fieldwork_subtype", "supervisee_purpose"):
             if field in request.data:
                 setattr(rel, field, request.data[field] or "")
         standard_before = (rel.fieldwork_requirements, rel.fieldwork_standard_basis, rel.fieldwork_application_year, rel.fieldwork_standard_note)

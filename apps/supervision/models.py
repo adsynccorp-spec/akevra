@@ -386,6 +386,8 @@ class DevelopmentPlanGoal(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveMode
     description = models.TextField(blank=True, default="")
     status = models.CharField(max_length=32, default=RecordStatus.ACTIVE)
     sort_order = models.PositiveSmallIntegerField(default=0)
+    # B5: a goal adopted from an AI suggestion resolves back to it (carried forward into later plan versions)
+    ai_suggestion = models.ForeignKey("AISuggestion", on_delete=models.PROTECT, null=True, blank=True, related_name="adopted_goals")
 
     class Meta:
         db_table = "development_plan_goal"
@@ -1061,19 +1063,47 @@ class ComplianceRuleParameter(UUIDPrimaryKeyModel, TimestampedModel, SoftArchive
         db_table = "compliance_rule_parameter"
 
 
+class ReminderStatus(models.TextChoices):
+    OPEN = "open", "Open"
+    RESOLVED = "resolved", "Resolved"
+    DISMISSED = "dismissed", "Dismissed"
+    # The shortfall is no longer present (e.g. a session was documented); set by the system
+    CLEARED = "cleared", "Cleared"
+
+
 class ComplianceReminder(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """A shortfall reminder: a separate fact from the compliance figure it points at. Resolving or
+    dismissing it records what the user did and never changes any compliance data."""
+
     cycle = models.ForeignKey(
         MonthlyCycle, on_delete=models.PROTECT, related_name="reminders"
     )
     message = models.TextField()
-    status = models.CharField(max_length=32, default="open")
+    status = models.CharField(max_length=32, choices=ReminderStatus.choices, default=ReminderStatus.OPEN)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    # Which requirement check raised it (one open reminder per month and check)
+    check_key = models.CharField(max_length=64, blank=True, default="")
+    resolved_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    resolution_note = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "compliance_reminder"
+        ordering = ["-created_at"]
+
+
+class ReviewTarget(models.TextChoices):
+    ASSIGNMENT = "assignment", "Assignment"
+    HOURS_ENTRY = "hours_entry", "Hours entry"
+    SERVICE_HOURS = "service_hours_record", "Service hours"
+    MONTHLY_CYCLE = "monthly_cycle", "Monthly cycle"
+    MILESTONE = "development_plan_milestone", "Milestone"
+    SESSION = "supervision_session", "Session"
 
 
 class ReviewComment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """One feedback trail across assignments, hours entries, monthly cycles, milestones and sessions.
+    Comments are never edited or deleted."""
+
     relationship = models.ForeignKey(
         SupervisoryRelationship,
         on_delete=models.PROTECT,
@@ -1085,11 +1115,23 @@ class ReviewComment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Org
         related_name="review_comments",
     )
     body = models.TextField()
-    target_entity_type = models.CharField(max_length=64)
+    target_entity_type = models.CharField(max_length=64, choices=ReviewTarget.choices)
     target_entity_id = models.UUIDField()
 
     class Meta:
         db_table = "review_comment"
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["target_entity_type", "target_entity_id"])]
+
+
+class ConclusionReason(models.TextChoices):
+    CERTIFICATION_ACHIEVED = "certification_achieved", "Certification achieved"
+    REASSIGNMENT = "reassignment", "Reassigned to another Supervisor"
+    SUPERVISOR_DEPARTED = "supervisor_departed", "Supervisor left the organization"
+    SUPERVISEE_DEPARTED = "supervisee_departed", "Supervisee left the organization"
+    GOALS_COMPLETED = "goals_completed", "Development goals completed"
+    DUPLICATE = "duplicate", "Duplicate or overlapping relationship"
+    OTHER = "other", "Other"
 
 
 class RelationshipConclusion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
@@ -1101,12 +1143,24 @@ class RelationshipConclusion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveM
     reason = models.CharField(max_length=255)
     concluded_on = models.DateField()
     notes = models.TextField(blank=True, default="")
+    concluded_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
 
     class Meta:
         db_table = "relationship_conclusion"
 
 
+class SuggestionDisposition(models.TextChoices):
+    PENDING = "pending", "Awaiting review"
+    ACCEPTED = "accepted", "Accepted"
+    EDITED = "edited_accepted", "Edited and accepted"
+    REJECTED = "rejected", "Rejected"
+    SUPERSEDED = "superseded", "Superseded"
+
+
 class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Inert until a Supervisor dispositions it (Version 2.3 provenance). The identifier, prompt,
+    model and generated text never change; the disposition is recorded beside them."""
+
     relationship = models.ForeignKey(
         SupervisoryRelationship,
         on_delete=models.PROTECT,
@@ -1116,7 +1170,7 @@ class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
     prompt = models.TextField()
     model_name = models.CharField(max_length=128)
     explanation = models.TextField()
-    disposition = models.CharField(max_length=32, default="pending")
+    disposition = models.CharField(max_length=32, choices=SuggestionDisposition.choices, default=SuggestionDisposition.PENDING)
     dispositioned_by = models.ForeignKey(
         "accounts.UserAccount",
         on_delete=models.PROTECT,
@@ -1124,9 +1178,43 @@ class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
         blank=True,
         related_name="ai_dispositions",
     )
+    # The original generated suggestion: {"category", "title", "description", "evidence": [...], "confidence"}
+    content = models.JSONField(default=dict, blank=True)
+    # Fingerprint of the records the suggestion was generated from; when they change it is stale
+    context_hash = models.CharField(max_length=64, blank=True, default="")
+    batch_id = models.UUIDField(null=True, blank=True)
+    requested_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    dispositioned_at = models.DateTimeField(null=True, blank=True)
+    disposition_note = models.TextField(blank=True, default="")
+    # Edit-and-Accept: the Supervisor's final text, kept beside the original
+    final_content = models.JSONField(null=True, blank=True)
+    superseded_by = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
 
     class Meta:
         db_table = "ai_suggestion"
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            original = type(self).objects.filter(pk=self.pk).values("suggestion_identifier", "prompt", "model_name", "explanation", "content").first()
+            if original and original != {"suggestion_identifier": self.suggestion_identifier, "prompt": self.prompt,
+                                         "model_name": self.model_name, "explanation": self.explanation, "content": self.content}:
+                raise ValidationError("An AI suggestion's identifier, prompt, model and generated text are immutable.")
+        return super().save(*args, **kwargs)
+
+
+class AISuggestionEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Disposition history of one suggestion, in order. Never edited."""
+
+    suggestion = models.ForeignKey(AISuggestion, on_delete=models.PROTECT, related_name="events")
+    action = models.CharField(max_length=32)
+    actor = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    note = models.TextField(blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "ai_suggestion_event"
+        ordering = ["created_at"]
 
 
 class Notification(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):

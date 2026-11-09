@@ -194,3 +194,29 @@ class MemberCredentialView(APIView):
             write_audit(action="user.credential_changed", entity_type="user_account", entity_id=account.id, request=request,
                         before={"credential_type": before}, after={"credential_type": credential})
         return Response({"id": str(account.id), "credential_type": account.credential_type})
+
+
+class MemberDepartView(APIView):
+    """An Administrator records that a person has left: their workspace sign-in ends and their active
+    relationships are concluded. Nothing they recorded is deleted; authorized viewers keep access."""
+
+    permission_classes = [IsUserManager]
+
+    @extend_schema(tags=["Invitations"], summary="Record that a member has left the organization", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        from django.core.exceptions import ValidationError
+
+        from apps.accounts.models import UserAccount
+        from apps.audit.services import write_audit
+        from apps.supervision import closure
+
+        account = UserAccount.objects.filter(organization=request.organization, pk=pk).first()
+        if account is None:
+            return _error("Not found.", 404)
+        try:
+            concluded = closure.depart(account, request.user_account, notes=request.data.get("notes") or "")
+        except ValidationError as exc:
+            return _error(" ".join(exc.messages), 400)
+        write_audit(action="user.departed", entity_type="user_account", entity_id=account.id, request=request,
+                    after={"record_status": account.record_status, "concluded_relationships": [str(c.relationship_id) for c in concluded]})
+        return Response({"id": str(account.id), "record_status": account.record_status, "concluded_relationships": len(concluded)})

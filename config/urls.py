@@ -18,5 +18,7 @@ urlpatterns = [
     path("api/v1/rbac/", include("apps.rbac.urls")),
     path("api/v1/users/", include("apps.accounts.user_urls")),
     path("api/v1/", include("apps.supervision.urls")),
+    path("api/v1/", include("apps.supervision.ai_urls")),
+    path("api/v1/", include("apps.supervision.review_urls")),
     path("api/v1/audit/", include("apps.audit.urls")),
 ]

@@ -94,6 +94,13 @@ def _serialize_goal(goal):
         "description": goal.description,
         "status": goal.status,
         "sort_order": goal.sort_order,
+        # B5: a goal adopted from an AI suggestion resolves back to it (full history: GET /ai-suggestions/<id>)
+        "ai_suggestion": None if goal.ai_suggestion_id is None else {
+            "id": str(goal.ai_suggestion_id),
+            "identifier": str(goal.ai_suggestion.suggestion_identifier),
+            "model_name": goal.ai_suggestion.model_name,
+            "disposition": goal.ai_suggestion.disposition,
+        },
     }
 
 
@@ -152,6 +159,7 @@ def _create_children(plan, *, goals, competencies, milestones):
             description=goal.get("description") or "",
             status=goal.get("status") or RecordStatus.ACTIVE,
             sort_order=goal.get("sort_order", index),
+            ai_suggestion_id=goal.get("ai_suggestion_id") or None,
         )
     for index, competency in enumerate(competencies or []):
         DevelopmentPlanCompetency.objects.create(
@@ -188,6 +196,8 @@ def snapshot_children(plan):
                 "description": g.description,
                 "status": g.status,
                 "sort_order": g.sort_order,
+                # Carried into every later version so the goal keeps resolving to its AI suggestion (B5)
+                "ai_suggestion_id": g.ai_suggestion_id,
             }
             for g in plan.goals.all()
         ],
@@ -233,6 +243,26 @@ def _tag_competency(competency, track):
     return {**competency, **tags}
 
 
+def _check_goal_suggestion(relationship, suggestion_id, index):
+    """A goal may point at an AI suggestion only if that suggestion belongs to this relationship and a
+    Supervisor adopted it (Accept or Edit-and-Accept). Keeps the link when the plan is edited later."""
+    if not suggestion_id:
+        return
+    from apps.supervision.models import AISuggestion, SuggestionDisposition
+
+    try:
+        suggestion_uuid = uuid.UUID(str(suggestion_id))
+    except ValueError:
+        raise ValidationError(f"Goal {index}: unknown AI suggestion.") from None
+    adopted = AISuggestion.objects.filter(
+        pk=suggestion_uuid,
+        relationship=relationship,
+        disposition__in=[SuggestionDisposition.ACCEPTED, SuggestionDisposition.EDITED],
+    ).exists()
+    if not adopted:
+        raise ValidationError(f"Goal {index}: only an AI suggestion a Supervisor accepted can be linked to a goal.")
+
+
 def prepare_plan_items(*, relationship, goals=None, competencies=None, milestones=None):
     """Checks submitted items and returns the competencies with their tags.
     Items a revision copies over (lists left as None) aren't re-checked or re-tagged, so earlier
@@ -243,6 +273,7 @@ def prepare_plan_items(*, relationship, goals=None, competencies=None, milestone
         category = goal.get("category") or ""
         if category and category not in _GOAL_CATEGORIES:
             raise ValidationError(f"Goal {index}: unknown category '{category}'.")
+        _check_goal_suggestion(relationship, goal.get("ai_suggestion_id"), index)
     for index, competency in enumerate(competencies or [], start=1):
         current = competency.get("current_level") or ""
         target = competency.get("target_level") or ""
@@ -303,7 +334,7 @@ def create_development_plan(
         _create_children(plan, goals=goals, competencies=competencies, milestones=milestones)
     return (
         DevelopmentPlan.objects.select_related("relationship")
-        .prefetch_related("goals", "competencies", "milestones")
+        .prefetch_related("goals__ai_suggestion", "competencies", "milestones")
         .get(pk=plan.pk)
     )
 
@@ -341,7 +372,7 @@ def revise_development_plan(current_plan, *, summary=None, goals=None, competenc
         )
     return (
         DevelopmentPlan.objects.select_related("relationship")
-        .prefetch_related("goals", "competencies", "milestones")
+        .prefetch_related("goals__ai_suggestion", "competencies", "milestones")
         .get(pk=new_plan.pk)
     )
 
