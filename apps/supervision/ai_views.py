@@ -86,7 +86,7 @@ class RelationshipSuggestionsView(APIView):
         return Response({
             "relationship": _relationship_summary(rel),
             "can_manage": has_permission(me, "idp.manage", relationship=rel),
-            "generator": ai.generator_info(),
+            "generator": ai.generator_info(rel.organization),
             "counts": _counts(items),
             "suggestions": items,
         })
@@ -96,6 +96,8 @@ class GenerateSuggestionsView(APIView):
     permission_classes = [HasWorkspace]
 
     @extend_schema(tags=TAGS, summary="Request a new batch of suggestions (supersedes earlier pending ones)",
+                   description="Body (optional): {mode: teaching | justification}. Teaching mode (the default) poses a reasoning "
+                               "question first and the Supervisor reveals the suggestion; justification mode shows it directly.",
                    operation_id="ai_suggestions_generate", request=None, responses=JSON_RESPONSE)
     def post(self, request, pk):
         rel = _relationship(pk)
@@ -104,11 +106,12 @@ class GenerateSuggestionsView(APIView):
         if denied := _denied(request, "idp.manage", rel, "ai_suggestion", "generate"):
             return denied
         try:
-            created = ai.generate(rel, request.user_account, request=request)
+            data = request.data if isinstance(request.data, dict) else {}
+            created = ai.generate(rel, request.user_account, mode=data.get("mode") or "teaching", request=request)
         except ValidationError as exc:
             return _bad_request(exc)
         items = _serialize_all(_queryset().filter(pk__in=[s.pk for s in created]).order_by("created_at"))
-        return Response({"generator": ai.generator_info(), "suggestions": items}, status=status.HTTP_201_CREATED)
+        return Response({"generator": ai.generator_info(rel.organization), "suggestions": items}, status=status.HTTP_201_CREATED)
 
 
 class AllSuggestionsView(APIView):
@@ -127,7 +130,7 @@ class AllSuggestionsView(APIView):
         for item in items:
             by_rel.setdefault(item["relationship_id"], []).append(item)
         return Response({
-            "generator": ai.generator_info(),
+            "generator": ai.generator_info(me.organization),
             "counts": _counts(items),
             "relationships": [
                 {**_relationship_summary(rel), "status": rel.status,
@@ -194,5 +197,28 @@ class SuggestionDispositionView(APIView):
             return _bad_request(exc)
         fresh = _queryset().get(pk=suggestion.pk)
         out = ai.serialize_suggestion(fresh)
+        out["can_manage"] = True
+        return Response(out)
+
+
+class SuggestionRevealView(APIView):
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=TAGS, summary="Teaching mode: reveal a suggestion (optionally recording the Supervisor's own reasoning first)",
+                   description="Body (optional): {reflection}.", operation_id="ai_suggestions_reveal", request=None, responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        suggestion, error = _load(request, pk)
+        if error:
+            return error
+        if denied := _denied(request, "idp.manage", suggestion.relationship, "ai_suggestion", suggestion.id):
+            return denied
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            ai.reveal(suggestion, request.user_account, reflection=data.get("reflection") or "", request=request)
+        except PermissionDenied:
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        out = ai.serialize_suggestion(_queryset().get(pk=suggestion.pk))
         out["can_manage"] = True
         return Response(out)

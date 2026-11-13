@@ -58,8 +58,10 @@ class OrganizationSettingsView(APIView):
 
     def _payload(self, request):
         org = request.user_account.organization
+        from apps.supervision.ai import generator_info
+
         return {"name": org.name, "require_external_reporting": org.require_external_reporting, "time_zone": org.time_zone,
-                "can_edit": _is_admin(request)}
+                "ai_enabled": org.ai_enabled, "ai_generator": generator_info(org), "can_edit": _is_admin(request)}
 
     @extend_schema(tags=["Settings"], summary="Organization settings", operation_id="organization_settings", responses=JSON_RESPONSE)
     def get(self, request):
@@ -76,6 +78,12 @@ class OrganizationSettingsView(APIView):
             org.save(update_fields=["require_external_reporting", "updated_at"])
             write_audit(action="organization.settings", entity_type="organization", entity_id=org.id, request=request,
                         before={"require_external_reporting": before}, after={"require_external_reporting": org.require_external_reporting})
+        if "ai_enabled" in request.data:
+            before = org.ai_enabled
+            org.ai_enabled = bool(request.data["ai_enabled"])
+            org.save(update_fields=["ai_enabled", "updated_at"])
+            write_audit(action="organization.settings", entity_type="organization", entity_id=org.id, request=request,
+                        before={"ai_enabled": before}, after={"ai_enabled": org.ai_enabled})
         if "time_zone" in request.data:
             zone = str(request.data["time_zone"] or "").strip()
             try:

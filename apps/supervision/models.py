@@ -1157,6 +1157,13 @@ class SuggestionDisposition(models.TextChoices):
     SUPERSEDED = "superseded", "Superseded"
 
 
+class PresentationMode(models.TextChoices):
+    # REQ-032: the reasoning question is posed first and the suggestion is revealed on request (default)
+    TEACHING = "teaching", "Teaching mode"
+    # REQ-032 fallback the Supervisor selects explicitly: the recommendation and its evidence directly
+    JUSTIFICATION = "justification", "Justification mode"
+
+
 class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
     """Inert until a Supervisor dispositions it (Version 2.3 provenance). The identifier, prompt,
     model and generated text never change; the disposition is recorded beside them."""
@@ -1189,6 +1196,10 @@ class AISuggestion(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, Orga
     # Edit-and-Accept: the Supervisor's final text, kept beside the original
     final_content = models.JSONField(null=True, blank=True)
     superseded_by = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    presentation_mode = models.CharField(max_length=16, choices=PresentationMode.choices, default=PresentationMode.JUSTIFICATION)
+    # Teaching mode: when the Supervisor revealed the suggestion, and the reasoning they wrote first (optional)
+    revealed_at = models.DateTimeField(null=True, blank=True)
+    supervisor_reflection = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "ai_suggestion"

@@ -60,9 +60,11 @@ class AITeachingAssistantTests(TestCase):
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         return client
 
-    def generate(self, client=None):
+    def generate(self, client=None, mode="justification"):
+        # Disposition tests use justification mode (shown directly); teaching mode is covered separately
         client = client or self.as_user("jordan@akevra.test")
-        response = client.post(f"/api/v1/relationships/{self.rbt.id}/ai-suggestions/generate")
+        body = {"mode": mode} if mode else {}
+        response = client.post(f"/api/v1/relationships/{self.rbt.id}/ai-suggestions/generate", body, format="json")
         self.assertEqual(response.status_code, 201, response.data)
         return response.data["suggestions"]
 
@@ -287,7 +289,7 @@ class AITeachingAssistantTests(TestCase):
     # --- Generator selection ------------------------------------------------------------------
     def test_no_api_key_uses_the_rule_generator(self):
         page = self.as_user("jordan@akevra.test").get("/api/v1/ai-suggestions").data
-        self.assertEqual(page["generator"], {"kind": "rules", "name": ai.RULES_GENERATOR, "ai_configured": False})
+        self.assertEqual(page["generator"], {"kind": "rules", "name": ai.RULES_GENERATOR, "ai_configured": False, "ai_enabled": False})
 
     def test_api_path_stores_prompt_and_returned_model_and_falls_back_on_error(self):
         reply = {"model": "claude-sonnet-5-5", "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({
@@ -299,6 +301,7 @@ class AITeachingAssistantTests(TestCase):
             ]})}]}
         response = mock.MagicMock()
         response.__enter__.return_value = io.BytesIO(json.dumps(reply).encode())
+        self.enable_ai()
         with mock.patch.object(ai, "_api_key", return_value="test-key"), \
                 mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
             created = ai.generate(self.rbt, self.jordan)
@@ -309,8 +312,136 @@ class AITeachingAssistantTests(TestCase):
         self.assertEqual(json.loads(sent.data)["messages"][0]["content"], created[0].prompt)  # the exact prompt
         self.assertEqual([s.model_name for s in created], ["claude-sonnet-5-5"] * 2)
         self.assertEqual((created[1].content["category"], created[1].content["confidence"]), ("other", "low"))
+        # REQ-031: a bare string becomes evidence with category and strength; confidence follows strength, not the model
+        self.assertEqual(created[0].content["evidence"], [{"text": "Official rating: Needs Training", "category": "other", "strength": "limited"}])
+        self.assertEqual(created[0].content["confidence"], "low")
 
         with mock.patch.object(ai, "_api_key", return_value="test-key"), \
                 mock.patch("urllib.request.urlopen", side_effect=OSError("network down")):
             fallback = ai.generate(self.rbt, self.jordan)
         self.assertEqual({s.model_name for s in fallback}, {ai.RULES_GENERATOR})
+
+    # --- helpers for the opt-in AI path ------------------------------------------------------
+    def enable_ai(self, on=True):
+        org = self.rbt.organization
+        org.ai_enabled = on
+        org.save(update_fields=["ai_enabled", "updated_at"])
+
+    def mocked_reply(self, suggestions):
+        reply = {"model": "claude-sonnet-5-5", "stop_reason": "end_turn",
+                 "content": [{"type": "text", "text": json.dumps({"suggestions": suggestions})}]}
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(reply).encode())
+        return response
+
+    TWO = [
+        {"category": "clinical_documentation", "title": "Notes within 24 hours", "description": "d",
+         "evidence": [{"text": "Official rating: Needs Training", "category": "official_assessment", "strength": "strong"}],
+         "assumptions": ["a"], "limitations": ["l"], "alternatives": [], "teaching_question": "q?", "explanation": "e"},
+        {"category": "data_collection", "title": "Second goal", "description": "d",
+         "evidence": [{"text": "x", "category": "compliance_record", "strength": "moderate"},
+                      {"text": "y", "category": "nope", "strength": "??"}], "explanation": "e"},
+    ]
+
+    # --- Opt-in: nothing goes to the AI provider unless the organization turned AI on ---------
+    def test_ai_is_off_until_an_administrator_turns_it_on(self):
+        self.assertFalse(self.rbt.organization.ai_enabled)  # default off
+        with mock.patch.object(ai, "_api_key", return_value="test-key"), mock.patch("urllib.request.urlopen") as urlopen:
+            created = ai.generate(self.rbt, self.jordan)
+            info = ai.generator_info(self.rbt.organization)
+        urlopen.assert_not_called()
+        self.assertEqual({s.model_name for s in created}, {ai.RULES_GENERATOR})
+        self.assertEqual(info, {"kind": "rules", "name": ai.RULES_GENERATOR, "ai_configured": True, "ai_enabled": False})
+
+        jordan = self.as_user("jordan@akevra.test")
+        self.assertEqual(jordan.patch("/api/v1/organization/settings", {"ai_enabled": True}, format="json").status_code, 403)
+        admin = APIClient()
+        token = admin.post("/api/v1/auth/login", {"email": "settings.admin@akevra.test", "password": PASSWORD}, format="json").data["token"]
+        admin.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        with mock.patch.object(ai, "_api_key", return_value="test-key"):
+            turned_on = admin.patch("/api/v1/organization/settings", {"ai_enabled": True}, format="json").data
+        self.assertTrue(turned_on["ai_enabled"])
+        self.assertEqual(turned_on["ai_generator"]["kind"], "ai")
+        self.assertTrue(AuditEvent.objects.filter(action="organization.settings", after={"ai_enabled": True}).exists())
+        self.rbt.organization.refresh_from_db()
+        with mock.patch.object(ai, "_api_key", return_value="test-key"), \
+                mock.patch("urllib.request.urlopen", return_value=self.mocked_reply(self.TWO)) as urlopen:
+            created = ai.generate(self.rbt, self.jordan)
+        urlopen.assert_called_once()
+        self.assertEqual({s.model_name for s in created}, {"claude-sonnet-5-5"})
+
+    # --- Redaction: identifiers typed into free text never reach the provider ------------------
+    def test_identifiers_in_free_text_are_redacted_before_sending(self):
+        self.enable_ai()
+        from apps.supervision.services import revise_development_plan
+
+        revise_development_plan(self.plan, goals=[
+            {"title": "Review notes with Alex Rivera (alex@akevra.test, 555-123-4567, cert 1-01-11007, MRN 4829301)",
+             "category": "clinical_documentation"}])
+        with mock.patch.object(ai, "_api_key", return_value="test-key"), \
+                mock.patch("urllib.request.urlopen", return_value=self.mocked_reply(self.TWO)) as urlopen:
+            created = ai.generate(self.rbt, self.jordan)
+        sent = json.loads(urlopen.call_args.args[0].data)["messages"][0]["content"]
+        for leaked in ("Alex", "Rivera", "alex@akevra.test", "555-123-4567", "1-01-11007", "4829301", "Jordan", "Northshore"):
+            self.assertNotIn(leaked, sent)
+        self.assertIn("[REDACTED]", sent)
+        self.assertIn('"assessed_on": "2026-10"', sent)  # full dates reduced to year-month
+        self.assertNotIn("2026-10-12", sent)
+        self.assertEqual(created[0].prompt, sent)  # what was sent is exactly what is recorded
+        event = created[0].events.get(action="generated")
+        self.assertEqual(event.detail["redactions"], 5)  # full name, email, phone, cert, record number
+
+    # --- REQ-031: complete explanation content ---------------------------------------------------
+    def test_every_suggestion_carries_evidence_assumptions_limitations_and_scoped_confidence(self):
+        for s in self.generate():
+            content = s["content"]
+            for key in ("evidence", "assumptions", "limitations", "alternatives", "teaching_question", "confidence"):
+                self.assertIn(key, content)
+            self.assertTrue(content["evidence"] and content["limitations"] and content["teaching_question"])
+            for item in content["evidence"]:
+                self.assertIn(item["category"], ai.EVIDENCE_CATEGORIES)
+                self.assertIn(item["strength"], ai.EVIDENCE_STRENGTHS)
+            self.assertEqual(content["confidence"], ai.confidence_from(content["evidence"]))
+        self.assertEqual(ai.confidence_from([{"strength": "strong"}, {"strength": "limited"}]), "low")
+        self.assertEqual(ai.confidence_from([{"strength": "strong"}]), "high")
+
+        self.enable_ai()
+        with mock.patch.object(ai, "_api_key", return_value="test-key"), \
+                mock.patch("urllib.request.urlopen", return_value=self.mocked_reply(self.TWO)):
+            created = ai.generate(self.rbt, self.jordan)
+        self.assertEqual(created[0].content["confidence"], "high")
+        self.assertEqual((created[0].content["assumptions"], created[0].content["teaching_question"]), (["a"], "q?"))
+        self.assertEqual(created[1].content["evidence"][1], {"text": "y", "category": "other", "strength": "limited"})
+        self.assertEqual(created[1].content["confidence"], "low")
+        self.assertTrue(created[1].content["teaching_question"])  # a default question when the model gave none
+
+    # --- REQ-032: teaching mode by default, justification only when selected ---------------------
+    def test_teaching_mode_is_the_default_and_must_be_revealed_before_accepting(self):
+        jordan = self.as_user("jordan@akevra.test")
+        suggestions = self.generate(jordan, mode=None)  # no mode sent
+        self.assertEqual({s["presentation_mode"] for s in suggestions}, {"teaching"})
+        first, second = suggestions[0], suggestions[1]
+        self.assertIsNone(first["revealed_at"])
+        blocked = self.dispose(jordan, first["id"], action="accept")
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("Reveal", str(blocked.data))
+
+        alex = self.as_user("alex@akevra.test")
+        self.assertEqual(alex.post(f"/api/v1/ai-suggestions/{first['id']}/reveal", {}, format="json").status_code, 404)
+        revealed = jordan.post(f"/api/v1/ai-suggestions/{first['id']}/reveal", {"reflection": "Docs are the gap."}, format="json")
+        self.assertEqual(revealed.status_code, 200, revealed.data)
+        self.assertTrue(revealed.data["revealed_at"])
+        self.assertEqual(revealed.data["supervisor_reflection"], "Docs are the gap.")
+        self.assertEqual([e["action"] for e in revealed.data["events"]], ["generated", "revealed"])
+        self.assertTrue(AuditEvent.objects.filter(action="ai_suggestion.reveal", entity_id=first["id"]).exists())
+        self.assertEqual(jordan.post(f"/api/v1/ai-suggestions/{first['id']}/reveal", {}, format="json").status_code, 400)
+        self.assertEqual(self.dispose(jordan, first["id"], action="accept").status_code, 200)
+        # Rejecting doesn't need a reveal
+        self.assertEqual(self.dispose(jordan, second["id"], action="reject", note="Not now").status_code, 200)
+
+        direct = self.generate(jordan, mode="justification")
+        self.assertEqual({s["presentation_mode"] for s in direct}, {"justification"})
+        self.assertEqual(jordan.post(f"/api/v1/ai-suggestions/{direct[0]['id']}/reveal", {}, format="json").status_code, 400)
+        self.assertEqual(self.dispose(jordan, direct[0]["id"], action="accept").status_code, 200)
+        bad = jordan.post(f"/api/v1/relationships/{self.rbt.id}/ai-suggestions/generate", {"mode": "auto"}, format="json")
+        self.assertEqual(bad.status_code, 400)

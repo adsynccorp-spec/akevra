@@ -8,4 +8,5 @@ urlpatterns = [
     path("ai-suggestions", aiv.AllSuggestionsView.as_view(), name="ai-suggestions"),
     path("ai-suggestions/<uuid:pk>", aiv.SuggestionDetailView.as_view(), name="ai-suggestion-detail"),
     path("ai-suggestions/<uuid:pk>/disposition", aiv.SuggestionDispositionView.as_view(), name="ai-suggestion-disposition"),
+    path("ai-suggestions/<uuid:pk>/reveal", aiv.SuggestionRevealView.as_view(), name="ai-suggestion-reveal"),
 ]
