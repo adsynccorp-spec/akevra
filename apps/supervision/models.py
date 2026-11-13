@@ -1228,6 +1228,91 @@ class AISuggestionEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel,
         ordering = ["created_at"]
 
 
+class SessionDocKind(models.TextChoices):
+    # Private to the Supervisor of record; never shown to the supervisee
+    SUPERVISOR_NOTE = "supervisor_note", "Supervisor note"
+    # Shared with the assigned supervisee only after the Supervisor approves it
+    SUPERVISEE_FEEDBACK = "supervisee_feedback", "Supervisee feedback summary"
+
+
+class SessionDocStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    APPROVED = "approved", "Approved"
+
+
+class SessionDocumentation(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """Guided, AI-assisted documentation of one supervision session (one per session: no duplicate entry).
+    The Supervisor answers four short prompts; AI drafts a private supervisor note and a supervisee feedback
+    summary from them, each edited and approved separately."""
+
+    session = models.OneToOneField(SupervisionSession, on_delete=models.PROTECT, related_name="documentation")
+    observed = models.TextField(blank=True, default="")
+    feedback_given = models.TextField(blank=True, default="")
+    changes_assigned = models.TextField(blank=True, default="")
+    next_focus = models.TextField(blank=True, default="")
+    updated_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+
+    class Meta:
+        db_table = "session_documentation"
+
+
+class SessionDocDraft(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """One generated draft (immutable provenance): identifier, the exact prompt or rule input, model version, time."""
+
+    documentation = models.ForeignKey(SessionDocumentation, on_delete=models.PROTECT, related_name="drafts")
+    kind = models.CharField(max_length=24, choices=SessionDocKind.choices)
+    identifier = models.UUIDField(unique=True)
+    prompt = models.TextField()
+    model_name = models.CharField(max_length=128)
+    content = models.JSONField(default=dict)
+    redactions = models.PositiveIntegerField(default=0)
+    requested_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+
+    class Meta:
+        db_table = "session_doc_draft"
+        ordering = ["created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            original = type(self).objects.filter(pk=self.pk).values("identifier", "prompt", "model_name", "content", "kind").first()
+            if original and original != {"identifier": self.identifier, "prompt": self.prompt, "model_name": self.model_name,
+                                         "content": self.content, "kind": self.kind}:
+                raise ValidationError("A generated draft's identifier, prompt, model and text are immutable.")
+        return super().save(*args, **kwargs)
+
+
+class SessionDocOutput(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    """The working text of one output (edited by the Supervisor), approved on its own."""
+
+    documentation = models.ForeignKey(SessionDocumentation, on_delete=models.PROTECT, related_name="outputs")
+    kind = models.CharField(max_length=24, choices=SessionDocKind.choices)
+    content = models.JSONField(default=dict)
+    source_draft = models.ForeignKey(SessionDocDraft, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    edited = models.BooleanField(default=False)
+    status = models.CharField(max_length=16, choices=SessionDocStatus.choices, default=SessionDocStatus.DRAFT)
+    approved_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    # Supervisee feedback only: receipt acknowledged by the supervisee (separate from the Supervisor's approval)
+    acknowledged_by = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "session_doc_output"
+        constraints = [models.UniqueConstraint(fields=["documentation", "kind"], name="uniq_session_doc_output_kind")]
+
+
+class SessionDocEvent(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
+    documentation = models.ForeignKey(SessionDocumentation, on_delete=models.PROTECT, related_name="events")
+    kind = models.CharField(max_length=24, blank=True, default="")
+    action = models.CharField(max_length=32)
+    actor = models.ForeignKey("accounts.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "session_doc_event"
+        ordering = ["created_at"]
+
+
 class Notification(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveModel, OrganizationScopedModel):
     """An in-app message for one person (the bell). Some are also emailed. Never compliance-bearing."""
 

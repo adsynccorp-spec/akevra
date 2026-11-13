@@ -5,6 +5,7 @@ from apps.supervision import scheduling_views as sv
 from apps.supervision import assessment_views as av
 from apps.supervision import notification_views as nv
 from apps.supervision import period_views as pv
+from apps.supervision import session_doc_views as sdv
 from apps.supervision import settings_views as stv
 from apps.supervision import overview_views as ov
 
@@ -63,6 +64,12 @@ urlpatterns = [
     path("assignment-attachments/<uuid:pk>/download", mv.AttachmentDownloadView.as_view(), name="assignment-attachment-download"),
     path("assignments/<uuid:pk>/issue", mv.AssignmentIssueView.as_view(), name="assignment-issue"),
     path("sessions/<uuid:pk>", mv.SessionDetailView.as_view(), name="session-detail"),
+    path("sessions/<uuid:pk>/documentation", sdv.SessionDocumentationView.as_view(), name="session-documentation"),
+    path("sessions/<uuid:pk>/documentation/generate", sdv.SessionDocumentationGenerateView.as_view(), name="session-documentation-generate"),
+    path("sessions/<uuid:pk>/documentation/acknowledge", sdv.SessionDocumentationAcknowledgeView.as_view(), name="session-documentation-acknowledge"),
+    path("sessions/<uuid:pk>/documentation/<str:kind>", sdv.SessionDocumentationOutputView.as_view(), name="session-documentation-output"),
+    path("sessions/<uuid:pk>/documentation/<str:kind>/approve", sdv.SessionDocumentationApproveView.as_view(), name="session-documentation-approve"),
+    path("my-feedback", sdv.MyFeedbackView.as_view(), name="my-feedback"),
     path("session-attachments/<uuid:pk>/download", mv.SessionAttachmentDownloadView.as_view(), name="session-attachment-download"),
     path("relationships/<uuid:pk>/notes", mv.RelationshipNotesView.as_view(), name="relationship-notes"),
     # Scheduling (logistics only; never compliance-bearing)
