@@ -24,11 +24,13 @@ from apps.supervision.compliance import relationship_compliance
 from apps.supervision.models import (
     AssessmentStatus,
     CompetencyAssessment,
+    LEGACY_LEVEL_LABELS,
     CompetencyLevel,
     DevelopmentPlan,
     MonthlyCycle,
     SupervisoryRelationship,
 )
+from apps.supervision.assessments import assessment_rating_label, is_legacy
 from apps.supervision.monthly_views import _relationship_summary, _relationships_with
 
 TREND_MONTHS = 6
@@ -200,7 +202,7 @@ class CompetencyOverviewView(APIView):
                 history.setdefault(key, []).append(a)
         latest = {key: items[-1] for key, items in history.items()}
         regressions = [
-            {"assessment": items[-1], "from": items[-2].rating}
+            {"assessment": items[-1], "from": items[-2].rating, "from_label": assessment_rating_label(items[-2])}
             for items in history.values()
             if len(items) > 1 and LEVELS.index(items[-1].rating) < LEVELS.index(items[-2].rating)
         ]
@@ -215,8 +217,11 @@ class CompetencyOverviewView(APIView):
                     due.append({"relationship_id": str(plan.relationship_id), "competency": competency.name})
 
         distribution = {level: 0 for level in LEVELS}
+        legacy_distribution = {level: 0 for level in LEVELS}
         for a in latest.values():
             distribution[a.rating] += 1
+            if is_legacy(a):
+                legacy_distribution[a.rating] += 1
         rated = sum(distribution.values())
         proficient = sum(distribution[level] for level in PROFICIENT)
 
@@ -230,6 +235,8 @@ class CompetencyOverviewView(APIView):
                 "related_goal": a.related_goal.title if a.related_goal_id else None,
                 "assessed_on": a.assessed_on.isoformat(),
                 "rating": a.rating,
+                "rating_label": assessment_rating_label(a),
+                "rating_scale": "legacy" if is_legacy(a) else "current",
                 "status": a.status,
                 "assessed_by": a.assessed_by.full_name if a.assessed_by_id else None,
                 "can_manage": a.relationship_id in managers,
@@ -240,7 +247,8 @@ class CompetencyOverviewView(APIView):
             if a.status == AssessmentStatus.READY_FOR_REVIEW and a.relationship_id in managers:
                 attention.append({"kind": "pending_review", **row(a)})
         for item in regressions:
-            attention.append({"kind": "regression", "previous_rating": item["from"], **row(item["assessment"])})
+            attention.append({"kind": "regression", "previous_rating": item["from"],
+                              "previous_rating_label": item["from_label"], **row(item["assessment"])})
         for a in latest.values():
             if a.rating == CompetencyLevel.NEEDS_TRAINING:
                 attention.append({"kind": "needs_training", **row(a)})
@@ -259,7 +267,11 @@ class CompetencyOverviewView(APIView):
                 "relationships": len(rels),
             },
             "distribution": [
-                {"rating": level, "label": CompetencyLevel(level).label, "level": LEVELS.index(level) + 1, "count": distribution[level]}
+                # count is every latest rating at this level; legacy_count of them were recorded on the legacy scale
+                # (shown with their original name, legacy_label)
+                {"rating": level, "label": CompetencyLevel(level).label, "level": LEVELS.index(level) + 1, "count": distribution[level],
+                 "current_count": distribution[level] - legacy_distribution[level], "legacy_count": legacy_distribution[level],
+                 "legacy_label": LEGACY_LEVEL_LABELS[level]}
                 for level in reversed(LEVELS)
             ],
             "due": due,

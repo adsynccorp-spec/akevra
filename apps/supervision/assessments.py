@@ -4,6 +4,9 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from apps.supervision.models import (
+    CURRENT_RATING_SCALE,
+    LEGACY_LEVEL_LABELS,
+    LEGACY_RATING_SCALE,
     AssessmentStatus,
     CompetencyAssessment,
     CompetencyLevel,
@@ -62,7 +65,12 @@ def _ensure_no_duplicate_draft(assessment):
 def update_assessment(assessment, **fields):
     if assessment.status == AssessmentStatus.OFFICIAL:
         raise ValidationError("A finalized assessment can't be changed. Record a new assessment instead.")
+    previous = assessment.rating
     _apply(assessment, assessment.relationship, fields)
+    # An unfinished draft given a different rating, chosen from the current scale, is rated on that scale from now
+    # on; re-saving it with the same rating keeps the scale it was recorded on
+    if assessment.rating and assessment.rating != previous:
+        assessment.rating_scale = CURRENT_RATING_SCALE
     _ensure_no_duplicate_draft(assessment)
     assessment.save()
     return assessment
@@ -101,15 +109,23 @@ def finalize(assessment):
 
 
 def rating_label(value):
+    """The name of a level on the current scale."""
     return dict(CompetencyLevel.choices).get(value, value or "")
 
 
-def recorded_as(a):
-    from apps.supervision.models import LEGACY_LEVEL_LABELS, SCALE_RENAMED_ON
+def is_legacy(a):
+    return a.rating_scale == LEGACY_RATING_SCALE
 
-    if a.created_at and a.created_at.date().isoformat() < SCALE_RENAMED_ON and a.rating in LEGACY_LEVEL_LABELS:
+
+def assessment_rating_label(a):
+    """The rating in the terms it was recorded in: a legacy-scale rating keeps its original name."""
+    if is_legacy(a) and a.rating in LEGACY_LEVEL_LABELS:
         return LEGACY_LEVEL_LABELS[a.rating]
-    return None
+    return rating_label(a.rating)
+
+
+def scale_label(a):
+    return "Legacy Scale" if is_legacy(a) else "Current Scale"
 
 
 def serialize_assessment(a):
@@ -127,9 +143,10 @@ def serialize_assessment(a):
         },
         "assessed_on": a.assessed_on.isoformat(),
         "rating": a.rating,
-        "rating_label": rating_label(a.rating),
-        # The name this level had when it was recorded, if the scale was renamed since (shown alongside, never replaced)
-        "recorded_as": recorded_as(a),
+        # Shown in the terms it was recorded in; a legacy-scale rating is never converted to the current names
+        "rating_label": assessment_rating_label(a),
+        "rating_scale": "legacy" if is_legacy(a) else "current",
+        "rating_scale_label": scale_label(a),
         "documented_content": a.documented_content,
         "status": a.status,
         "assessed_by": None if a.assessed_by_id is None else {"id": str(a.assessed_by_id), "name": a.assessed_by.full_name},
@@ -143,13 +160,18 @@ def summarize(assessments):
     latest = {}
     for a in sorted(assessments, key=lambda x: (x.assessed_on, x.created_at)):
         if a.status == AssessmentStatus.OFFICIAL:
-            latest[a.competency_name.lower()] = a.rating
-    ratings = list(latest.values())
+            latest[a.competency_name.lower()] = a
+    ratings = [a.rating for a in latest.values()]
+    legacy = [a.rating for a in latest.values() if is_legacy(a)]
+    current = [a.rating for a in latest.values() if not is_legacy(a)]
     return {
         "total_assessed": len(ratings),
         "proficient": sum(r in (CompetencyLevel.INDEPENDENT, CompetencyLevel.PERFORMS_WITH_SUPPORT) for r in ratings),
         "developing": sum(r == CompetencyLevel.DEVELOPING for r in ratings),
         "needs_improvement": sum(r == CompetencyLevel.NEEDS_TRAINING for r in ratings),
-        # One count per level of the four-level rating scale
-        "by_rating": {level: sum(r == level for r in ratings) for level in RATINGS},
+        # One count per level of the current scale; latest ratings still on the legacy scale are counted
+        # separately under their original names
+        "by_rating": {level: sum(r == level for r in current) for level in RATINGS},
+        "legacy_by_rating": [{"rating": level, "label": LEGACY_LEVEL_LABELS[level], "count": legacy.count(level)}
+                             for level in RATINGS if level in legacy],
     }

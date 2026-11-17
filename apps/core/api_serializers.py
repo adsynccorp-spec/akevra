@@ -234,6 +234,21 @@ class SessionPatchSerializer(SessionCreateSerializer):
     complete = serializers.BooleanField(required=False, default=False)
 
 
+class SessionCorrectionSerializer(serializers.Serializer):
+    """An audited correction of a completed record: add details never recorded, or archive it. Reason required."""
+
+    action = serializers.ChoiceField(choices=["complete", "archive"])
+    reason = serializers.CharField()
+    meeting_method = serializers.ChoiceField(choices=["in_person", "remote", "phone", "asynchronous"], required=False)
+    start_time = serializers.TimeField(required=False)
+    end_time = serializers.TimeField(required=False)
+    topics = serializers.CharField(required=False, allow_blank=True)
+    activities = serializers.CharField(required=False, allow_blank=True)
+    feedback = serializers.CharField(required=False, allow_blank=True)
+    follow_up = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
 class NoteCreateSerializer(serializers.Serializer):
     body = serializers.CharField()
 

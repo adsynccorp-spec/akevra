@@ -68,7 +68,7 @@ class CompetencyAssessmentTests(TestCase):
         self.assertEqual([a["id"] for a in listed["assessments"]], [aid])  # drafts stay hidden
         self.assertFalse(listed["can_manage"])
         self.assertEqual(listed["summary"], {"total_assessed": 1, "proficient": 1, "developing": 0, "needs_improvement": 0,
-                                             "by_rating": {"needs_training": 0, "developing": 0, "performs_with_support": 0, "independent": 1}})
+                                             "by_rating": {"needs_training": 0, "developing": 0, "performs_with_support": 0, "independent": 1}, "legacy_by_rating": []})
 
         jordan.patch(f"/api/v1/assessments/{second['id']}", {"documented_content": "Missed IOA twice."}, format="json")
         jordan.post(f"/api/v1/assessments/{second['id']}/finalize")

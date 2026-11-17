@@ -34,6 +34,7 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.rbac.services import has_permission
 from apps.supervision import services
+from apps.supervision.assessments import assessment_rating_label, is_legacy
 from apps.supervision.models import (
     COMPETENCY_LEVEL_ORDER,
     COMPLIANCE_BEARING_TRACKS,
@@ -155,6 +156,8 @@ def build_context(relationship, *, exclude_batch=None):
         latest[assessment.competency_name] = {
             "competency": assessment.competency_name,
             "rating": assessment.rating,
+            "rating_label": assessment_rating_label(assessment),
+            "rating_scale": "legacy" if is_legacy(assessment) else "current",
             "assessed_on": assessment.assessed_on.isoformat(),
         }
     statuses = {}
@@ -292,7 +295,8 @@ def _rules_generate(context):
                 "explanation": "An individualized goal should rest on a documented rating, not on the plan's estimate alone.",
             })
             continue
-        evidence = [_ev(f"Latest official assessment of {name}: {_level(level)} ({rating['assessed_on']}).", "official_assessment", "strong")]
+        shown = f"{rating['rating_label']} (Legacy Scale)" if rating.get("rating_scale") == "legacy" else _level(level)
+        evidence = [_ev(f"Latest official assessment of {name}: {shown} ({rating['assessed_on']}).", "official_assessment", "strong")]
         if competency["target_level"]:
             evidence.append(_ev(f"Plan target level: {_level(competency['target_level'])}.", "development_plan", "strong"))
         items.append({

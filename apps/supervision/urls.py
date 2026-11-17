@@ -64,6 +64,7 @@ urlpatterns = [
     path("assignment-attachments/<uuid:pk>/download", mv.AttachmentDownloadView.as_view(), name="assignment-attachment-download"),
     path("assignments/<uuid:pk>/issue", mv.AssignmentIssueView.as_view(), name="assignment-issue"),
     path("sessions/<uuid:pk>", mv.SessionDetailView.as_view(), name="session-detail"),
+    path("sessions/<uuid:pk>/correction", mv.SessionCorrectionView.as_view(), name="session-correction"),
     path("sessions/<uuid:pk>/documentation", sdv.SessionDocumentationView.as_view(), name="session-documentation"),
     path("sessions/<uuid:pk>/documentation/generate", sdv.SessionDocumentationGenerateView.as_view(), name="session-documentation-generate"),
     path("sessions/<uuid:pk>/documentation/acknowledge", sdv.SessionDocumentationAcknowledgeView.as_view(), name="session-documentation-acknowledge"),

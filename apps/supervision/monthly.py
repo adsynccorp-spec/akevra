@@ -452,6 +452,15 @@ def _minutes_of(value):
     return value.hour * 60 + value.minute
 
 
+def _clash(session, other):
+    """Two records of the same supervisee on the same date that may describe the same event."""
+    if session.start_time and session.end_time and other.start_time and other.end_time:
+        return _minutes_of(session.start_time) < _minutes_of(other.end_time) and _minutes_of(other.start_time) < _minutes_of(session.end_time)
+    # Without times on either record, overlap can't be ruled out: the same kind of session for the same
+    # supervisee on the same day is treated as the same event (e.g. a Quick Log later documented in full)
+    return other.session_type == session.session_type
+
+
 def ensure_not_duplicate(session):
     """A formal session can't be documented twice: another completed session for the same
     supervisee on the same date whose time overlaps (or, without times, with the same duration,
@@ -464,13 +473,7 @@ def ensure_not_duplicate(session):
         status=SessionStatus.COMPLETED, record_status="active", meeting_method__in=QUALIFYING_MEETING_METHODS,
     ).exclude(pk=session.pk).select_related("cycle__relationship__supervisor")
     for other in others:
-        if session.start_time and session.end_time and other.start_time and other.end_time:
-            clash = _minutes_of(session.start_time) < _minutes_of(other.end_time) and _minutes_of(other.start_time) < _minutes_of(session.end_time)
-        else:
-            # Without times on either record, overlap can't be ruled out: the same kind of session for the same
-            # supervisee on the same day is treated as the same event (e.g. a Quick Log later documented in full)
-            clash = other.session_type == session.session_type
-        if clash:
+        if _clash(session, other):
             when = f" {other.start_time:%H:%M}–{other.end_time:%H:%M}" if other.start_time and other.end_time else ""
             raise ValidationError(
                 f"A completed session is already documented for {rel.supervisee.full_name} on {other.occurred_on:%b %d, %Y}{when} "
@@ -494,6 +497,109 @@ def ensure_complete_record(session):
             "A completed session record needs " + ", ".join(missing)
             + ". Save it as a draft and complete it once it is fully documented."
         )
+
+
+REVIEW_FLAGS = {
+    "missing_method": "Meeting method not recorded",
+    "missing_times": "Start and end times not recorded",
+    "missing_documentation": "No description of what happened in the session",
+    "future_date": "Dated after the day it was completed",
+    "possible_duplicate": "May duplicate another completed session on the same day",
+}
+
+
+def review_flags(sessions):
+    """Completed records documented before the current safeguards that need the Supervisor's review: incomplete
+    documentation, a future date, or a possible duplicate. A flag is information only: it never changes what a
+    record counts toward. Changes are made through an audited correction (correct_session)."""
+    sessions = [s for s in sessions if s.status == SessionStatus.COMPLETED and s.record_status == "active"]
+    if not sessions:
+        return {}
+    by_day = {}
+    peers = SupervisionSession.objects.filter(
+        cycle__relationship__supervisee_id__in={s.cycle.relationship.supervisee_id for s in sessions},
+        occurred_on__in={s.occurred_on for s in sessions}, status=SessionStatus.COMPLETED, record_status="active",
+        meeting_method__in=QUALIFYING_MEETING_METHODS,
+    ).select_related("cycle__relationship")
+    for peer in peers:
+        by_day.setdefault((peer.cycle.relationship.supervisee_id, peer.occurred_on), []).append(peer)
+    # Guided session documentation (the single-entry workflow) also documents what happened
+    from apps.supervision.models import SessionDocumentation
+
+    guided = {
+        d.session_id for d in SessionDocumentation.objects.filter(session__in=sessions)
+        if any((getattr(d, f) or "").strip() for f in ("observed", "feedback_given", "changes_assigned", "next_focus"))
+    }
+    flags = {}
+    for s in sessions:
+        counts = (s.meeting_method or "") in QUALIFYING_MEETING_METHODS
+        found = []
+        if not s.meeting_method:
+            found.append("missing_method")
+        if counts and not (s.start_time and s.end_time):
+            found.append("missing_times")
+        if s.pk not in guided and not any((getattr(s, f) or "").strip() for f in NARRATIVE_FIELDS):
+            found.append("missing_documentation")
+        if s.created_at and s.occurred_on > s.created_at.date():
+            found.append("future_date")
+        if counts and any(o.pk != s.pk and _clash(s, o) for o in by_day.get((s.cycle.relationship.supervisee_id, s.occurred_on), [])):
+            found.append("possible_duplicate")
+        if found:
+            flags[s.pk] = [{"code": code, "label": REVIEW_FLAGS[code]} for code in found]
+    return flags
+
+
+CORRECTABLE_FIELDS = ("meeting_method", "start_time", "end_time") + NARRATIVE_FIELDS
+
+
+def correct_session(session, actor, *, action, reason, **fields):
+    """The audited correction of a completed record (for records flagged for review). A reason is required and the
+    month must be open: a verified, closed month is reopened (with its own reason) first, so a verified result never
+    changes silently. 'complete' adds details that were never recorded (recorded values are never overwritten, and
+    times must agree with the recorded duration, so credit can't change by accident); 'archive' withdraws a record
+    entered in error or as a duplicate (it is kept, with its history, but no longer counts).
+    Returns (before, after) for the audit event."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValidationError("Give the reason for this correction; it is kept in the audit history.")
+    if session.status != SessionStatus.COMPLETED or session.record_status != "active":
+        raise ValidationError("Only an active completed session record can be corrected. Edit a draft directly.")
+    ensure_open(session.cycle, "supervision sessions")
+    if action == "archive":
+        before = {"record_status": "active"}
+        with transaction.atomic():
+            session.record_status = "archived"
+            session.archived_at = timezone.now()
+            session.save(update_fields=["record_status", "archived_at", "updated_at"])
+        return before, {"record_status": "archived"}
+    if action != "complete":
+        raise ValidationError("Choose a correction: add missing details, or archive the record.")
+    changes = {k: v for k, v in fields.items() if k in CORRECTABLE_FIELDS and v not in (None, "")}
+    if not changes:
+        raise ValidationError("Enter at least one missing detail.")
+    already = [k for k in changes if getattr(session, k) not in (None, "")]
+    if already:
+        raise ValidationError("Only details that were never recorded can be added; recorded values stay as they are "
+                              f"({', '.join(k.replace('_', ' ') for k in already)}).")
+    before = {k: _plain(getattr(session, k)) for k in changes}
+    for key, value in changes.items():
+        setattr(session, key, value)
+    if bool(session.start_time) != bool(session.end_time):
+        raise ValidationError("Add both the start and the end time.")
+    if session.start_time and session.end_time:
+        if session.end_time <= session.start_time:
+            raise ValidationError("The end time must be after the start time.")
+        if _minutes_between(session.start_time, session.end_time) != session.duration_minutes:
+            raise ValidationError(f"The times must match the recorded duration ({session.duration_minutes} min).")
+    with transaction.atomic():
+        _lock_supervisee(session)
+        ensure_not_duplicate(session)
+        session.save()
+    return before, {k: _plain(getattr(session, k)) for k in changes}
+
+
+def _plain(value):
+    return value.strftime("%H:%M") if hasattr(value, "strftime") else value
 
 
 def _lock_supervisee(session):
@@ -665,7 +771,9 @@ def serialize_hours(entry):
     }
 
 
-def serialize_session(session):
+def serialize_session(session, flags=None):
+    if flags is None:
+        flags = review_flags([session]).get(session.pk, [])
     return {
         "id": str(session.id),
         "cycle_id": str(session.cycle_id),
@@ -688,6 +796,9 @@ def serialize_session(session):
         "notes": session.notes,
         "documented_by": _person(session.documented_by),
         "documented_at": session.updated_at.isoformat(),
+        # Flagged for the Supervisor's review (information only; corrections go through the audited correction)
+        "review_flags": flags,
+        "needs_review": bool(flags),
         "attachments": [
             {
                 "id": str(a.id),

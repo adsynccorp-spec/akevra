@@ -7,7 +7,7 @@ import io
 from datetime import date
 
 from apps.core.models import RecordStatus
-from apps.supervision.assessments import rating_label, recorded_as
+from apps.supervision.assessments import assessment_rating_label, scale_label
 from apps.supervision.models import (
     COMPLIANCE_BEARING_TRACKS,
     AssessmentStatus,
@@ -118,8 +118,8 @@ def build(relationship):
         for s in sessions
     ]
     development["assessments"] = [
-        {"date": a.assessed_on.isoformat(), "competency": a.competency_name, "rating": rating_label(a.rating),
-         "recorded_as": recorded_as(a) or "",
+        {"date": a.assessed_on.isoformat(), "competency": a.competency_name, "rating": assessment_rating_label(a),
+         "rating_scale": scale_label(a),
          "assessed_by": a.assessed_by.full_name if a.assessed_by_id else "", "evidence": a.documented_content}
         for a in CompetencyAssessment.objects.filter(relationship=rel, status=AssessmentStatus.OFFICIAL).select_related("assessed_by").order_by("assessed_on")
     ]

@@ -75,25 +75,38 @@ class QARound4Tests(TestCase):
             reminders.refresh(future)
         self.assertFalse(ComplianceReminder.objects.filter(cycle=future).exists())
 
-    def test_rating_scale_uses_the_agreed_names_and_keeps_the_recorded_name(self):
+    def test_rating_scale_uses_the_agreed_names_and_legacy_ratings_keep_their_original_terms(self):
+        from apps.supervision.assessments import summarize, update_assessment
+        from apps.supervision.models import LEGACY_RATING_SCALE
+
         plan = create_development_plan(organization=self.rbt.organization, relationship=self.rbt,
                                        competencies=[{"name": "Data collection", "current_level": "developing", "target_level": "independent"}])
         competency = plan.competencies.get()
-        old = CompetencyAssessment.objects.create(
-            organization=self.rbt.organization, relationship=self.rbt, assessed_on=date(2026, 10, 1), rating="developing",
-            status=AssessmentStatus.OFFICIAL, plan_competency=competency, competency_name=competency.name,
-            documented_content="x", assessed_by=self.jordan)
-        CompetencyAssessment.objects.filter(pk=old.pk).update(created_at=timezone.make_aware(timezone.datetime(2026, 10, 1)))
-        old.refresh_from_db()
+        common = dict(organization=self.rbt.organization, relationship=self.rbt, plan_competency=competency,
+                      competency_name=competency.name, documented_content="x", assessed_by=self.jordan)
+        old = CompetencyAssessment.objects.create(**common, assessed_on=date(2026, 10, 1), rating="developing",
+                                                  status=AssessmentStatus.OFFICIAL, rating_scale=LEGACY_RATING_SCALE)
         data = serialize_assessment(old)
-        self.assertEqual((data["rating"], data["rating_label"], data["recorded_as"]), ("developing", "Emerging", "Developing"))
-        new = CompetencyAssessment.objects.create(
-            organization=self.rbt.organization, relationship=self.rbt, assessed_on=date(2026, 11, 20), rating="independent",
-            status=AssessmentStatus.OFFICIAL, plan_competency=competency, competency_name=competency.name,
-            documented_content="x", assessed_by=self.jordan)
-        CompetencyAssessment.objects.filter(pk=new.pk).update(created_at=timezone.make_aware(timezone.datetime(2026, 11, 20)))
-        new.refresh_from_db()
-        self.assertEqual((serialize_assessment(new)["rating_label"], serialize_assessment(new)["recorded_as"]), ("Proficient", None))
+        # Shown in its original terms with a Legacy Scale label; the stored rating is untouched
+        self.assertEqual((data["rating"], data["rating_label"], data["rating_scale"], data["rating_scale_label"]),
+                         ("developing", "Developing", "legacy", "Legacy Scale"))
+        new = CompetencyAssessment.objects.create(**common, assessed_on=date(2026, 11, 20), rating="independent", status=AssessmentStatus.OFFICIAL)
+        self.assertEqual((serialize_assessment(new)["rating_label"], serialize_assessment(new)["rating_scale_label"]), ("Proficient", "Current Scale"))
+        summary = summarize([old])
+        self.assertEqual((summary["by_rating"]["developing"], summary["legacy_by_rating"]), (0, [{"rating": "developing", "label": "Developing", "count": 1}]))
+        # A finalized legacy rating can't be changed or re-rated
+        with self.assertRaises(Exception):
+            update_assessment(old, rating="independent")
+        old.refresh_from_db()
+        self.assertEqual((old.rating, old.rating_scale), ("developing", LEGACY_RATING_SCALE))
+        # An unfinished legacy draft re-rated from the current scale is recorded on the current scale
+        draft = CompetencyAssessment.objects.create(**{**common, "documented_content": ""}, assessed_on=date(2026, 10, 2),
+                                                    rating="developing", rating_scale=LEGACY_RATING_SCALE)
+        update_assessment(draft, rating="developing", documented_content="re-saved")
+        self.assertEqual(serialize_assessment(draft)["rating_scale"], "legacy")
+        update_assessment(draft, rating="performs_with_support")
+        self.assertEqual(serialize_assessment(draft)["rating_label"], "Developing")
+        self.assertEqual(serialize_assessment(draft)["rating_scale"], "current")
 
     def test_quick_log_style_record_and_full_record_are_the_same_event(self):
         jordan = self.as_user("jordan@akevra.test")
@@ -124,3 +137,52 @@ class QARound4Tests(TestCase):
         for row in (bare, full, other_day):
             row.refresh_from_db()
         self.assertEqual((bare.record_status, full.record_status, other_day.record_status), ("archived", "active", "active"))
+
+    def test_incomplete_records_are_flagged_for_review_and_corrected_only_through_an_audited_correction(self):
+        from apps.audit.models import AuditEvent
+        from apps.supervision.models import CycleStatus
+
+        jordan = self.as_user("jordan@akevra.test")
+        cycle = cycle_for_date(self.rbt, date(2026, 10, 5))
+        common = dict(organization=self.rbt.organization, cycle=cycle, duration_minutes=60, session_type="individual",
+                      documented_by=self.jordan, status="completed")
+        bare = SupervisionSession.objects.create(**common, occurred_on=date(2026, 10, 5))
+        full = SupervisionSession.objects.create(**common, occurred_on=date(2026, 10, 6), start_time="10:00", end_time="11:00",
+                                                 meeting_method="in_person", topics="Reviewed BIP")
+        twin = SupervisionSession.objects.create(**common, occurred_on=date(2026, 10, 6), start_time="10:30", end_time="11:30",
+                                                 meeting_method="in_person", topics="Reviewed BIP")
+        listed = {s["id"]: s for s in jordan.get(f"/api/v1/relationships/{self.rbt.id}/sessions").data["sessions"]}
+        self.assertEqual([f["code"] for f in listed[str(bare.id)]["review_flags"]], ["missing_method", "missing_times", "missing_documentation"])
+        self.assertEqual([f["code"] for f in listed[str(full.id)]["review_flags"]], ["possible_duplicate"])
+        # Flags never change what counts: the incomplete record still counts until it is corrected
+        self.assertTrue(listed[str(bare.id)]["qualifies"])
+        alex = self.as_user("alex@akevra.test")
+        seen = {s["id"]: s for s in alex.get(f"/api/v1/relationships/{self.rbt.id}/sessions").data["sessions"]}
+        self.assertEqual(seen[str(bare.id)]["review_flags"], [])
+        url = f"/api/v1/sessions/{bare.id}/correction"
+        self.assertEqual(alex.post(url, {"action": "archive", "reason": "x"}, format="json").status_code, 403)
+        # A reason is required; recorded values are never overwritten; times must agree with the recorded duration
+        self.assertEqual(jordan.post(url, {"action": "complete", "reason": " ", "meeting_method": "in_person"}, format="json").status_code, 400)
+        bad = jordan.post(url, {"action": "complete", "reason": "From calendar", "start_time": "09:00", "end_time": "11:00"}, format="json")
+        self.assertIn("recorded duration", str(bad.data))
+        ok = jordan.post(url, {"action": "complete", "reason": "Added from the session calendar", "meeting_method": "in_person",
+                               "start_time": "09:00", "end_time": "10:00", "topics": "Reviewed BIP"}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertEqual(ok.data["review_flags"], [])
+        again = jordan.post(url, {"action": "complete", "reason": "x", "topics": "Other"}, format="json")
+        self.assertIn("never recorded", str(again.data))
+        event = AuditEvent.objects.filter(entity_id=str(bare.id), action="session.correct").get()
+        self.assertEqual((event.before["meeting_method"], event.after["meeting_method"], event.metadata["reason"]),
+                         ("", "in_person", "Added from the session calendar"))
+        # Archiving a duplicate keeps the record and its history; it no longer counts
+        arch = jordan.post(f"/api/v1/sessions/{twin.id}/correction", {"action": "archive", "reason": "Same session entered twice"}, format="json")
+        self.assertEqual(arch.status_code, 200, arch.data)
+        twin.refresh_from_db()
+        self.assertEqual(twin.record_status, "archived")
+        self.assertTrue(AuditEvent.objects.filter(entity_id=str(twin.id), action="session.archive", metadata__reason="Same session entered twice").exists())
+        # A verified (closed) month can't be corrected until it is reopened with a reason
+        MonthlyCycleModel = type(cycle)
+        MonthlyCycleModel.objects.filter(pk=cycle.pk).update(status=CycleStatus.CLOSED)
+        closed = jordan.post(f"/api/v1/sessions/{full.id}/correction", {"action": "archive", "reason": "x"}, format="json")
+        self.assertEqual(closed.status_code, 400)
+        self.assertIn("Reopen the month", str(closed.data))

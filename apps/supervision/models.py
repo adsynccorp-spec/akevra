@@ -123,8 +123,7 @@ GOAL_CATEGORY_CHOICES = _DOMAINS + [("professional_growth", "Professional Growth
 
 class CompetencyLevel(models.TextChoices):
     """The agreed developmental scale (M6 reference v1.2). The stored values are the four ordered levels and
-    never change; only the names shown changed on 2026-11-18. Level 1-4 keep their meaning, so a rating
-    recorded before the change is shown with its earlier name alongside (LEGACY_LEVEL_LABELS)."""
+    never change. Assessments recorded on the earlier scale keep it and show its names (LEGACY_LEVEL_LABELS)."""
     NOT_YET_ASSESSED = "not_yet_assessed", "Not Yet Assessed"
     NEEDS_TRAINING = "needs_training", "Not Yet Demonstrated"  # level 1
     DEVELOPING = "developing", "Emerging"  # level 2
@@ -132,14 +131,17 @@ class CompetencyLevel(models.TextChoices):
     INDEPENDENT = "independent", "Proficient"  # level 4
 
 
-# Names the same stored levels had before 2026-11-18 (shown on earlier records, never silently replaced)
+# The scale an assessment was rated on is stored with it (CompetencyAssessment.rating_scale), so a rating is always
+# shown in the terms it was recorded in. Assessments rated before the agreed four-level scale keep the original
+# identifier and show their original names with a "Legacy Scale" label; nothing is converted or re-rated.
+LEGACY_RATING_SCALE = "akevra_competency_levels"
+CURRENT_RATING_SCALE = "akevra_competency_levels_v2"
 LEGACY_LEVEL_LABELS = {
     "needs_training": "Needs Training",
     "developing": "Developing",
     "performs_with_support": "Performs With Support",
     "independent": "Independent",
 }
-SCALE_RENAMED_ON = "2026-11-18"
 
 
 # Ordered lowest to highest; a target may equal the current level (maintenance, generalization, refinement)
@@ -1024,7 +1026,8 @@ class CompetencyAssessment(UUIDPrimaryKeyModel, TimestampedModel, SoftArchiveMod
         related_name="assessments",
     )
     assessed_on = models.DateField()
-    rating_scale = models.CharField(max_length=64, default="akevra_competency_levels")
+    # Which scale the rating was recorded on (LEGACY_RATING_SCALE / CURRENT_RATING_SCALE); never rewritten
+    rating_scale = models.CharField(max_length=64, default=CURRENT_RATING_SCALE)
     rating = models.CharField(max_length=64, choices=CompetencyLevel.choices, blank=True, default="")
     documented_content = models.TextField(blank=True, default="")
     approved = models.BooleanField(default=False)

@@ -24,6 +24,7 @@ from apps.core.api_serializers import (
     NoteCreateSerializer,
     ServiceHoursSerializer,
     SessionCreateSerializer,
+    SessionCorrectionSerializer,
     SessionPatchSerializer,
 )
 from apps.rbac.permissions import HasWorkspace
@@ -599,9 +600,12 @@ class SessionListView(APIView):
         ), {rel.id: rel})
         if request.query_params.get("year") and request.query_params.get("month"):
             qs = qs.filter(cycle__year=request.query_params["year"], cycle__month=request.query_params["month"])
+        qs = list(qs.select_related("cycle__relationship"))
+        can_document = has_permission(request.user_account, "session.document", relationship=rel)
+        flags = monthly.review_flags(qs) if can_document else {}
         return Response({
-            "can_document": has_permission(request.user_account, "session.document", relationship=rel),
-            "sessions": [monthly.serialize_session(s) for s in qs],
+            "can_document": can_document,
+            "sessions": [monthly.serialize_session(s, flags.get(s.pk, [])) for s in qs],
         })
 
     @extend_schema(tags=["Sessions"], summary="Document a supervision session, or save a draft (Supervisor)", request={"multipart/form-data": SessionCreateSerializer, "application/json": SessionCreateSerializer}, operation_id="sessions_create", responses=JSON_RESPONSE)
@@ -660,7 +664,8 @@ class SessionDetailView(APIView):
         can_document = has_permission(request.user_account, "session.document", relationship=rel)
         if session.status == SessionStatus.DRAFT and not can_document:
             return _not_found()
-        return Response({**monthly.serialize_session(session), "relationship_id": str(rel.id), "can_document": can_document})
+        flags = None if can_document else []
+        return Response({**monthly.serialize_session(session, flags), "relationship_id": str(rel.id), "can_document": can_document})
 
     @extend_schema(tags=["Sessions"], summary="Edit a draft session; complete=true makes it a completed record", request={"multipart/form-data": SessionPatchSerializer, "application/json": SessionPatchSerializer}, operation_id="sessions_update", responses=JSON_RESPONSE)
     def patch(self, request, pk):
@@ -683,6 +688,34 @@ class SessionDetailView(APIView):
                     entity_id=session.id, request=request, after={"status": session.status})
         if complete:
             notifications.session_documented(session, request.user_account)
+        return Response(monthly.serialize_session(_session(session.id)))
+
+
+class SessionCorrectionView(APIView):
+    """The audited correction of a completed session record flagged for review."""
+    permission_classes = [HasWorkspace]
+
+    @extend_schema(tags=["Sessions"], summary="Correct a completed session: add missing details or archive it, with a reason (Supervisor)",
+                   request=SessionCorrectionSerializer, operation_id="sessions_correct", responses=JSON_RESPONSE)
+    def post(self, request, pk):
+        session = _session(pk)
+        if session is None:
+            return _not_found()
+        if denied := _denied(request, "session.document", session.cycle.relationship, "supervision_session", session.id):
+            return denied
+        serializer = SessionCorrectionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _invalid(serializer)
+        data = dict(serializer.validated_data)
+        flags = [f["code"] for f in monthly.review_flags([session]).get(session.pk, [])]
+        try:
+            before, after = monthly.correct_session(session, request.user_account, **data)
+        except ValidationError as exc:
+            return _bad_request(exc)
+        write_audit(action="session.archive" if data["action"] == "archive" else "session.correct",
+                    entity_type="supervision_session", entity_id=session.id, request=request, before=before, after=after,
+                    metadata={"reason": data["reason"].strip(), "review_flags": flags,
+                              "month": f"{session.cycle.year}-{session.cycle.month:02d}"})
         return Response(monthly.serialize_session(_session(session.id)))
 
 
@@ -868,13 +901,13 @@ class AllSessionsView(APIView):
             .prefetch_related("attachments")
             .order_by("-occurred_on", "-created_at")
         ), rels)
+        documentable = {rel_id for rel_id, rel in rels.items() if has_permission(me, "session.document", relationship=rel)}
+        qs = list(qs.select_related("cycle__relationship"))
+        flags = monthly.review_flags([s for s in qs if s.cycle.relationship_id in documentable])
         return Response({
-            "documentable_relationships": [
-                _relationship_summary(rel) for rel in rels.values()
-                if has_permission(me, "session.document", relationship=rel)
-            ],
+            "documentable_relationships": [_relationship_summary(rels[rel_id]) for rel_id in rels if rel_id in documentable],
             "sessions": [
-                {**monthly.serialize_session(s), "relationship": _relationship_summary(rels[s.cycle.relationship_id])}
+                {**monthly.serialize_session(s, flags.get(s.pk, [])), "relationship": _relationship_summary(rels[s.cycle.relationship_id])}
                 for s in qs
             ],
         })
