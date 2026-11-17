@@ -457,16 +457,19 @@ def ensure_not_duplicate(session):
     supervisee on the same date whose time overlaps (or, without times, with the same duration,
     format and method) would give duplicate compliance credit."""
     rel = session.cycle.relationship
+    if (session.meeting_method or "") not in QUALIFYING_MEETING_METHODS:
+        return  # a phone or asynchronous record never gives credit, so it can't duplicate any
     others = SupervisionSession.objects.filter(
         cycle__relationship__supervisee_id=rel.supervisee_id, occurred_on=session.occurred_on,
-        status=SessionStatus.COMPLETED, record_status="active",
+        status=SessionStatus.COMPLETED, record_status="active", meeting_method__in=QUALIFYING_MEETING_METHODS,
     ).exclude(pk=session.pk).select_related("cycle__relationship__supervisor")
     for other in others:
         if session.start_time and session.end_time and other.start_time and other.end_time:
             clash = _minutes_of(session.start_time) < _minutes_of(other.end_time) and _minutes_of(other.start_time) < _minutes_of(session.end_time)
         else:
-            clash = (other.duration_minutes == session.duration_minutes and other.session_type == session.session_type
-                     and (other.meeting_method or "") == (session.meeting_method or ""))
+            # Without times on either record, overlap can't be ruled out: the same kind of session for the same
+            # supervisee on the same day is treated as the same event (e.g. a Quick Log later documented in full)
+            clash = other.session_type == session.session_type
         if clash:
             when = f" {other.start_time:%H:%M}–{other.end_time:%H:%M}" if other.start_time and other.end_time else ""
             raise ValidationError(

@@ -94,3 +94,33 @@ class QARound4Tests(TestCase):
         CompetencyAssessment.objects.filter(pk=new.pk).update(created_at=timezone.make_aware(timezone.datetime(2026, 11, 20)))
         new.refresh_from_db()
         self.assertEqual((serialize_assessment(new)["rating_label"], serialize_assessment(new)["recorded_as"]), ("Proficient", None))
+
+    def test_quick_log_style_record_and_full_record_are_the_same_event(self):
+        jordan = self.as_user("jordan@akevra.test")
+        # An older completed record without times (as Quick Log used to save)...
+        SupervisionSession.objects.create(
+            organization=self.rbt.organization, cycle=cycle_for_date(self.rbt, date(2026, 10, 14)), occurred_on=date(2026, 10, 14),
+            duration_minutes=60, session_type="individual", documented_by=self.jordan, status="completed")
+        # ...blocks documenting the same day's session again
+        again = self.post_session(jordan, meeting_method="in_person", topics="Reviewed BIP")
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("already documented", str(again.data))
+
+    def test_migration_archives_the_incomplete_duplicate_and_keeps_the_documented_record(self):
+        import importlib
+
+        from django.apps import apps as django_apps
+        from django.db import connection
+
+        cycle = cycle_for_date(self.rbt, date(2026, 10, 14))
+        common = dict(organization=self.rbt.organization, cycle=cycle, occurred_on=date(2026, 10, 14), duration_minutes=60,
+                      session_type="individual", documented_by=self.jordan, status="completed")
+        bare = SupervisionSession.objects.create(**common)
+        full = SupervisionSession.objects.create(**common, start_time="10:00", end_time="11:00", meeting_method="in_person", topics="M5 QA")
+        other_day = SupervisionSession.objects.create(**{**common, "occurred_on": date(2026, 10, 15)})
+        migration = importlib.import_module("apps.supervision.migrations.0029_archive_quick_log_duplicates")
+        with connection.schema_editor(atomic=False) as editor:
+            migration.forwards(django_apps, editor)
+        for row in (bare, full, other_day):
+            row.refresh_from_db()
+        self.assertEqual((bare.record_status, full.record_status, other_day.record_status), ("archived", "active", "active"))
