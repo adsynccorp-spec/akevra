@@ -48,6 +48,12 @@ class AITeachingAssistantTests(TestCase):
             rating="needs_training", status=AssessmentStatus.OFFICIAL, plan_competency=docs,
             competency_name=docs.name, documented_content="Notes late in 3 of 5 sessions.", assessed_by=cls.jordan,
         )
+        data = cls.plan.competencies.get(name="Data collection")
+        CompetencyAssessment.objects.create(
+            organization=cls.rbt.organization, relationship=cls.rbt, assessed_on=date(2026, 10, 12),
+            rating="developing", status=AssessmentStatus.OFFICIAL, plan_competency=data,
+            competency_name=data.name, documented_content="Prompting inconsistent.", assessed_by=cls.jordan,
+        )
 
     def setUp(self):
         patcher = mock.patch.object(ai, "_api_key", return_value="")  # the no-API-key path
@@ -66,7 +72,8 @@ class AITeachingAssistantTests(TestCase):
         body = {"mode": mode} if mode else {}
         response = client.post(f"/api/v1/relationships/{self.rbt.id}/ai-suggestions/generate", body, format="json")
         self.assertEqual(response.status_code, 201, response.data)
-        return response.data["suggestions"]
+        # Development goals first (the disposition tests adopt them); noted-only items after
+        return sorted(response.data["suggestions"], key=lambda s: not s["is_goal"])
 
     def plan_state(self):
         plans = DevelopmentPlan.objects.filter(relationship=self.rbt)
@@ -87,7 +94,7 @@ class AITeachingAssistantTests(TestCase):
         self.assertEqual(list(CompetencyAssessment.objects.filter(relationship=self.rbt).values()), assessments)
         # The rule generator turned the low official rating into a suggested goal
         titles = [s["content"]["title"] for s in suggestions]
-        self.assertIn("Raise Session documentation from Needs Training to Independent", titles)
+        self.assertIn("Raise Session documentation from Not Yet Demonstrated to Proficient", titles)
 
         jordan = self.as_user("jordan@akevra.test")
         accepted = self.dispose(jordan, suggestions[0]["id"], action="accept")
@@ -445,3 +452,34 @@ class AITeachingAssistantTests(TestCase):
         self.assertEqual(self.dispose(jordan, direct[0]["id"], action="accept").status_code, 200)
         bad = jordan.post(f"/api/v1/relationships/{self.rbt.id}/ai-suggestions/generate", {"mode": "auto"}, format="json")
         self.assertEqual(bad.status_code, 400)
+
+    # --- M7 clinical quality: compliance, admin and missing information are never supervisee goals ---------------
+    def test_suggestion_types_keep_compliance_admin_and_gaps_out_of_the_plan(self):
+        jordan = self.as_user("jordan@akevra.test")
+        with mock.patch.object(ai, "_compliance_shortfalls", return_value=[{"month": "2026-09", "unmet_requirements": ["Supervision percentage"]}]):
+            suggestions = self.generate(jordan)
+        by_rule = {s["content"]["title"]: s for s in suggestions}
+        goal = by_rule["Raise Session documentation from Not Yet Demonstrated to Proficient"]
+        self.assertEqual((goal["type"], goal["is_goal"]), ("competency_goal", True))
+        compliance = next(s for s in suggestions if s["type"] == "compliance_responsibility")
+        self.assertFalse(compliance["is_goal"])
+        self.assertIn("Supervisor action", compliance["content"]["title"])
+        admin = next(s for s in suggestions if s["type"] == "administrative_task")
+        before = self.plan_state()
+        refused = self.dispose(jordan, compliance["id"], action="accept")
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("not a supervisee development goal", str(refused.data))
+        noted = self.dispose(jordan, compliance["id"], action="acknowledge", note="Scheduling fixed")
+        self.assertEqual(noted.status_code, 200, noted.data)
+        self.assertEqual(noted.data["disposition"], "acknowledged")
+        self.assertEqual(self.plan_state(), before)  # nothing entered the plan
+        self.assertEqual(self.dispose(jordan, goal["id"], action="acknowledge").status_code, 400)
+        self.assertEqual(self.dispose(jordan, admin["id"], action="acknowledge").status_code, 200)
+
+    def test_classification_guard_overrides_the_model(self):
+        item = ai.classify({"type": "competency_goal", "evidence": [{"text": "Missed hours", "category": "compliance_record", "strength": "strong"}]})
+        self.assertEqual(item["type"], "information_gap")  # no documented deficit
+        item = ai.classify({"type": "development_opportunity", "evidence": [{"text": "Missed hours", "category": "compliance_record", "strength": "strong"}]})
+        self.assertEqual(item["type"], "compliance_responsibility")  # compliance records only
+        item = ai.classify({"type": "competency_goal", "evidence": [{"text": "Rated Emerging", "category": "official_assessment", "strength": "strong"}]})
+        self.assertEqual(item["type"], "competency_goal")

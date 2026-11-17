@@ -61,6 +61,7 @@ def _counts(items):
         "edited_accepted": sum(1 for s in items if s["disposition"] == SuggestionDisposition.EDITED),
         "rejected": sum(1 for s in items if s["disposition"] == SuggestionDisposition.REJECTED),
         "superseded": sum(1 for s in items if s["disposition"] == SuggestionDisposition.SUPERSEDED),
+        "noted": sum(1 for s in items if s["disposition"] == SuggestionDisposition.ACKNOWLEDGED),
         "total": len(items),
     }
 

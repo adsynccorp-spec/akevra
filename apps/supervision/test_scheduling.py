@@ -92,7 +92,7 @@ class SchedulingAcceptanceTests(TestCase):
         alex = self.as_user("alex@akevra.test")
         alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "40"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                    {"occurred_on": "2026-10-05", "duration_minutes": 60, "session_type": "individual", "client_observation": True},
+                    {"occurred_on": "2026-10-05", "duration_minutes": 60, "session_type": "individual", "client_observation": True, "meeting_method": "in_person", "topics": "Supervision review"},
                     format="json")
         baseline = self.figures(jordan)
 
@@ -136,7 +136,7 @@ class SchedulingAcceptanceTests(TestCase):
         alex = self.as_user("alex@akevra.test")
         alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "40"}, format="json")
         month = lambda: jordan.get(f"/api/v1/relationships/{self.rbt.id}/compliance").data["months"][-1]
-        base = {"occurred_on": "2026-10-06", "duration_minutes": 60, "session_type": "individual"}
+        base = {"occurred_on": "2026-10-06", "duration_minutes": 60, "session_type": "individual", "topics": "Supervision review"}
 
         phone = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions", {**base, "meeting_method": "phone"}, format="json")
         self.assertFalse(phone.data["qualifies"])

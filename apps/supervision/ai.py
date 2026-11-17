@@ -69,9 +69,21 @@ EVIDENCE_CATEGORIES = {
 }
 EVIDENCE_STRENGTHS = ("strong", "moderate", "limited")
 _CONFIDENCE_FOR_STRENGTH = {"strong": "high", "moderate": "moderate", "limited": "low"}
-CONTENT_KEYS = ("category", "title", "description", "evidence", "confidence", "assumptions", "limitations",
+# What a suggestion IS (M7 clinical quality): only the first two are supervisee development goals and can enter
+# the plan. The rest are noted by the Supervisor and never become an individualized goal.
+SUGGESTION_TYPES = {
+    "competency_goal": "Competency goal (documented deficit)",
+    "development_opportunity": "Professional-development opportunity",
+    "compliance_responsibility": "Supervisor / organizational compliance responsibility",
+    "administrative_task": "Scheduling or administrative task",
+    "information_gap": "Missing or unverified information",
+}
+GOAL_TYPES = ("competency_goal", "development_opportunity")
+# A competency goal needs a documented deficit: an official assessment or the supervisee's own work records
+_DEFICIT_EVIDENCE = ("official_assessment", "assignment_record")
+CONTENT_KEYS = ("type", "category", "title", "description", "evidence", "confidence", "assumptions", "limitations",
                 "alternatives", "teaching_question")
-ACTIONS = ("accept", "edit_accept", "reject")
+ACTIONS = ("accept", "edit_accept", "reject", "acknowledge")
 ADOPTED = (SuggestionDisposition.ACCEPTED, SuggestionDisposition.EDITED)
 
 _GOAL_CATEGORIES = {value for value, _ in GOAL_CATEGORY_CHOICES}
@@ -213,6 +225,25 @@ def _ev(text, category, strength):
     return {"text": text, "category": category, "strength": strength}
 
 
+def classify(item):
+    """Server-side guard on what a suggestion may be called (whatever the generator said): a competency goal
+    must rest on a documented deficit, and nothing drawn only from compliance records is a supervisee goal."""
+    kind = item.get("type") if item.get("type") in SUGGESTION_TYPES else "development_opportunity"
+    categories = {e.get("category") for e in item.get("evidence") or [] if isinstance(e, dict)}
+    documented = any(e.get("category") in _DEFICIT_EVIDENCE and e.get("strength") in ("strong", "moderate")
+                     for e in item.get("evidence") or [] if isinstance(e, dict))
+    if kind == "competency_goal" and not documented:
+        kind = "information_gap"
+        item.setdefault("limitations", []).append(
+            "Reclassified: no official assessment or work record documents a deficit, so this is not a competency goal yet.")
+    if kind in GOAL_TYPES and categories and categories <= {"compliance_record"}:
+        kind = "compliance_responsibility"
+        item.setdefault("limitations", []).append(
+            "Reclassified: drawn only from compliance records, which are a supervisor/organizational responsibility.")
+    item["type"] = kind
+    return item
+
+
 def confidence_from(evidence):
     """REQ-031: confidence is scoped only to evidence strength: the weakest piece cited sets it."""
     strengths = [e.get("strength") for e in evidence if isinstance(e, dict)]
@@ -230,7 +261,7 @@ def _rules_generate(context):
     ratings = {r["competency"]: r for r in context["official_competency_ratings"]}
     items = []
 
-    # R1: a competency officially rated (or planned) at Needs Training / Developing -> a goal to raise it
+    # R1: a competency officially rated at Not Yet Demonstrated / Emerging -> a goal to raise it
     for competency in plan["competencies"]:
         name = competency["name"]
         if name.lower() in goal_text:
@@ -244,14 +275,29 @@ def _rules_generate(context):
             target = CompetencyLevel.PERFORMS_WITH_SUPPORT
         if COMPETENCY_LEVEL_ORDER.index(target) <= COMPETENCY_LEVEL_ORDER.index(level):
             target = COMPETENCY_LEVEL_ORDER[COMPETENCY_LEVEL_ORDER.index(level) + 1]
-        evidence = (
-            [_ev(f"Latest official assessment of {name}: {_level(level)} ({rating['assessed_on']}).", "official_assessment", "strong")]
-            if rating else [_ev(f"Development plan lists {name} at {_level(level)}; no official assessment yet.", "development_plan", "limited")]
-        )
+        if not rating:
+            # A planned level alone isn't a documented deficit: the next step is an official assessment
+            items.append({
+                "rule": "R1b-unassessed-low-competency",
+                "type": "information_gap",
+                "category": _category_for(competency["domain"]),
+                "title": f"Record an official assessment of {name} before setting a goal",
+                "description": f"The plan estimates {name} at {_level(level)}, but no official assessment documents it. "
+                               "Observe it directly and record an official rating.",
+                "evidence": [_ev(f"Development plan lists {name} at {_level(level)}; no official assessment yet.", "development_plan", "limited")],
+                "assumptions": ["The plan's estimate may be out of date."],
+                "limitations": ["No direct observation is on record."],
+                "alternatives": [],
+                "teaching_question": f"{name} has only a planned level, not an official rating. What would you need to observe to rate it?",
+                "explanation": "An individualized goal should rest on a documented rating, not on the plan's estimate alone.",
+            })
+            continue
+        evidence = [_ev(f"Latest official assessment of {name}: {_level(level)} ({rating['assessed_on']}).", "official_assessment", "strong")]
         if competency["target_level"]:
             evidence.append(_ev(f"Plan target level: {_level(competency['target_level'])}.", "development_plan", "strong"))
         items.append({
             "rule": "R1-low-competency",
+            "type": "competency_goal",
             "category": _category_for(competency["domain"]),
             "title": f"Raise {name} from {_level(level)} to {_level(target)}",
             "description": (
@@ -260,9 +306,8 @@ def _rules_generate(context):
             ),
             "evidence": evidence,
             "assumptions": [f"The recorded level of {name} still reflects current performance."],
-            "limitations": ["Based only on the ratings recorded in AKEVRA; recent unrecorded observations are not included."]
-            + ([] if rating else ["No official assessment exists yet, so the starting level is the plan's estimate."]),
-            "alternatives": [f"Record a fresh official assessment of {name} first, then set the goal."] if rating else [],
+            "limitations": ["Based only on the ratings recorded in AKEVRA; recent unrecorded observations are not included."],
+            "alternatives": [f"Record a fresh official assessment of {name} first, then set the goal."],
             "teaching_question": f"{name} is rated below the plan's aim. Before you see the suggestion: what goal would you set to raise it, and how would you measure it?",
             "explanation": f"{name} is below the level the plan aims for and no goal in the current plan addresses it.",
         })
@@ -275,14 +320,16 @@ def _rules_generate(context):
     for label, months in sorted(missed.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         items.append({
             "rule": "R2-missed-compliance-check",
+            "type": "compliance_responsibility",
             "category": "professional_growth",
-            "title": f"Meet the monthly requirement: {label}"[:255],
+            "title": f"Supervisor action: make sure '{label}' is met next month"[:255],
             "description": (
-                "Plan supervision contacts and hours at the start of each month and review progress at mid-month "
-                f"so that '{label}' is met before the month closes."
+                "A supervision requirement is the supervisor's and organization's responsibility, not a supervisee "
+                f"development goal. Schedule enough contacts and hours early in the month so '{label}' is met before it closes."
             ),
             "evidence": [_ev(f"Not met in {month}.", "compliance_record", "strong" if len(months) > 1 else "moderate") for month in months],
             "assumptions": ["The supervision schedule can be adjusted within the month."],
+            # (compliance_responsibility: noted by the Supervisor, never added to the supervisee's plan)
             "limitations": ["Looks only at completed months recorded in AKEVRA."],
             "alternatives": ["Address the scheduling cause directly (for example a recurring booked slot) rather than as a development goal."],
             "teaching_question": f"The requirement '{label}' was missed in a completed month. What would you change so it is met next month?",
@@ -294,6 +341,7 @@ def _rules_generate(context):
     if revisions:
         items.append({
             "rule": "R3-revisions-requested",
+            "type": "development_opportunity",
             "category": "professional_growth",
             "title": "Complete assigned tasks to the stated criteria on first submission",
             "description": "Review each task's requirements before submitting and use a short self-check against them.",
@@ -311,8 +359,9 @@ def _rules_generate(context):
         listed = ", ".join(unrated[:3]) + (" and others" if len(unrated) > 3 else "")
         items.append({
             "rule": "R4-no-official-rating",
+            "type": "information_gap",
             "category": "professional_growth",
-            "title": f"Establish an official baseline rating for {listed}"[:255],
+            "title": f"Record an official baseline rating for {listed}"[:255],
             "description": "Observe each competency directly and record an official assessment so progress can be measured.",
             "evidence": [_ev(f"No official assessment recorded for: {', '.join(unrated)}.", "official_assessment", "moderate")],
             "assumptions": ["These competencies are still relevant to the plan."],
@@ -326,6 +375,7 @@ def _rules_generate(context):
     if not plan["competencies"]:
         items.append({
             "rule": "R5-no-competencies",
+            "type": "administrative_task",
             "category": "professional_growth",
             "title": "Identify the core competencies for this pathway and record a starting level for each",
             "description": "Select competencies from the plan library for this pathway and record where performance stands today.",
@@ -338,8 +388,9 @@ def _rules_generate(context):
         })
     items.append({
         "rule": "R6-review-cadence",
+        "type": "administrative_task",
         "category": "professional_growth",
-        "title": "Review progress on each development goal with the supervisor every month",
+        "title": "Schedule a monthly review of progress on each development goal",
         "description": "At one supervision contact each month, rate progress on every active goal and agree the next step.",
         "evidence": [_ev(f"{len(plan['goals'])} goal(s) in the current plan.", "development_plan", "limited")],
         "assumptions": ["Monthly supervision contact continues."],
@@ -350,6 +401,7 @@ def _rules_generate(context):
     })
 
     for item in items:
+        classify(item)
         item["confidence"] = confidence_from(item["evidence"])
     seen, unique = set(), []
     for item in items:
@@ -362,7 +414,17 @@ def _rules_generate(context):
 _AI_INSTRUCTIONS = """You are assisting a BACB-certified Supervisor who is writing an individualized development plan.
 Suggest between 2 and 4 development-plan goals for the supervisee, based only on the de-identified records below.
 Suggestions are reference material for the Supervisor to accept, edit or reject; they never change any record by themselves.
-Do not suggest changes to competency ratings or assessments. Historical records and trends are reference
+Do not suggest changes to competency ratings or assessments.
+
+Classify every suggestion with "type", keeping these apart:
+- "competency_goal": a supervisee competency deficit DOCUMENTED by an official assessment or the supervisee's own
+  work records. Never infer one from a compliance shortfall, a missing rating or plan setup alone.
+- "development_opportunity": a reasonable professional-development opportunity supported by the records.
+- "compliance_responsibility": a supervision-compliance shortfall (hours, contacts, percentages, observations).
+  These are the Supervisor's and organization's responsibility, not a supervisee goal.
+- "administrative_task": scheduling, setup or other administrative work.
+- "information_gap": information that is missing or unverified (for example no official rating yet).
+Historical records and trends are reference
 material for the Supervisor: describe what they show, never present them as a conclusion about the supervisee.
 Some text may read [REDACTED]; never try to guess what it was.
 
@@ -372,7 +434,7 @@ where more than one exists (otherwise an empty list), and one open reasoning que
 think through the gap before seeing your answer (do not give the answer away in the question).
 
 Reply with strict JSON only, no prose and no code fences, in exactly this shape:
-{"suggestions": [{"category": "<one of: %(categories)s>", "title": "<observable, measurable goal, max 200 characters>",
+{"suggestions": [{"type": "<one of: %(types)s>", "category": "<one of: %(categories)s>", "title": "<observable, measurable goal or action, max 200 characters>",
 "description": "<how the goal would be worked on and measured>",
 "evidence": [{"text": "<the specific record this point comes from>", "category": "<one of: %(evidence_categories)s>", "strength": "<strong|moderate|limited>"}],
 "assumptions": ["<...>"], "limitations": ["<...>"], "alternatives": ["<...>"],
@@ -385,6 +447,7 @@ Records:
 def _ai_prompt(context):
     return _AI_INSTRUCTIONS % {
         "categories": ", ".join(sorted(_GOAL_CATEGORIES)),
+        "types": ", ".join(SUGGESTION_TYPES),
         "evidence_categories": ", ".join(EVIDENCE_CATEGORIES),
         "context": json.dumps(context, sort_keys=True, indent=2),
     }
@@ -424,7 +487,8 @@ def _parse_ai_items(text):
             continue
         category = raw.get("category") if raw.get("category") in _GOAL_CATEGORIES else "other"
         evidence = _evidence_items(raw.get("evidence"))
-        items.append({
+        items.append(classify({
+            "type": raw.get("type"),
             "category": category,
             "title": title[:255],
             "description": str(raw.get("description") or "").strip(),
@@ -437,7 +501,7 @@ def _parse_ai_items(text):
             "teaching_question": str(raw.get("teaching_question") or "").strip()
             or "Before you see the suggestion: what goal would you set from these records, and why?",
             "explanation": str(raw.get("explanation") or "").strip() or "No explanation was given by the model.",
-        })
+        }))
     if len(items) < MIN_SUGGESTIONS:
         raise ValueError("The model returned fewer than two usable suggestions.")
     return items
@@ -662,7 +726,7 @@ def disposition(suggestion, actor, action, *, final_content=None, note="", reque
     """Accept / Edit-and-Accept / Reject a pending suggestion. Accepting adds the goal to the development
     plan as a NEW plan version (the earlier version is kept), with the goal linked to the suggestion."""
     if action not in ACTIONS:
-        raise ValidationError("Action must be accept, edit_accept or reject.")
+        raise ValidationError("Action must be accept, edit_accept, acknowledge or reject.")
     note = (note or "").strip()
     with transaction.atomic():
         suggestion = AISuggestion.objects.select_for_update().select_related("relationship", "relationship__organization").get(pk=suggestion.pk)
@@ -675,6 +739,23 @@ def disposition(suggestion, actor, action, *, final_content=None, note="", reque
             raise ValidationError("This suggestion has already been reviewed.")
         if suggestion.presentation_mode == PresentationMode.TEACHING and not suggestion.revealed_at and action != "reject":
             raise ValidationError("Reveal the suggestion before accepting it.")
+        is_goal = suggestion_type(suggestion) in GOAL_TYPES
+        if action == "acknowledge":
+            if is_goal:
+                raise ValidationError("A development goal is accepted, edited or rejected, not noted.")
+            suggestion.disposition = SuggestionDisposition.ACKNOWLEDGED
+            suggestion.dispositioned_by = actor
+            suggestion.dispositioned_at = timezone.now()
+            suggestion.disposition_note = note
+            suggestion.save(update_fields=["disposition", "dispositioned_by", "dispositioned_at", "disposition_note", "updated_at"])
+            _event(suggestion, "noted", actor, note)
+            write_audit(action="ai_suggestion.acknowledge", entity_type="ai_suggestion", entity_id=suggestion.id,
+                        request=request, organization=relationship.organization, after=_audit_summary(suggestion))
+            return suggestion
+        if action in ("accept", "edit_accept") and not is_goal:
+            raise ValidationError(
+                f"This is a {SUGGESTION_TYPES[suggestion_type(suggestion)].lower()}, not a supervisee development goal, "
+                "so it can't be added to the plan. Mark it as noted or reject it.")
 
         if action == "reject":
             if not note:
@@ -745,7 +826,13 @@ STATUS_LABELS = {
     SuggestionDisposition.EDITED: "Edited and accepted",
     SuggestionDisposition.REJECTED: "Rejected",
     SuggestionDisposition.SUPERSEDED: "Superseded by a newer request (not current)",
+    SuggestionDisposition.ACKNOWLEDGED: "Noted by the supervisor (not a plan goal)",
 }
+
+
+def suggestion_type(suggestion):
+    # Suggestions generated before types existed were all offered as goals
+    return (suggestion.content or {}).get("type") or "development_opportunity"
 
 
 def _person(user):
@@ -785,6 +872,9 @@ def serialize_suggestion(suggestion, *, current_hashes=None, include_prompt=True
         "disposition_note": suggestion.disposition_note,
         "superseded_by": str(suggestion.superseded_by.suggestion_identifier) if suggestion.superseded_by_id else None,
         "presentation_mode": suggestion.presentation_mode,
+        "type": suggestion_type(suggestion),
+        "type_label": SUGGESTION_TYPES.get(suggestion_type(suggestion), ""),
+        "is_goal": suggestion_type(suggestion) in GOAL_TYPES,
         "revealed_at": suggestion.revealed_at.isoformat() if suggestion.revealed_at else None,
         "supervisor_reflection": suggestion.supervisor_reflection,
         # B3: each text with its author

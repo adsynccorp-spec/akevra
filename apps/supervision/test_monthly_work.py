@@ -96,7 +96,7 @@ class MonthlyWorkAcceptanceTests(TestCase):
         for day in ("2026-08-10", "2026-07-30"):
             documented = jordan.post(
                 f"/api/v1/relationships/{self.rbt.id}/sessions",
-                {"occurred_on": day, "duration_minutes": 60, "session_type": "individual"},
+                {"occurred_on": day, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"},
                 format="json",
             )
             self.assertEqual(documented.status_code, 201, documented.data)
@@ -236,15 +236,15 @@ class MonthlyWorkAcceptanceTests(TestCase):
         # Only the Supervisor authors the session records the RBT's supervision hours come from
         self.assertEqual(
             alex.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                      {"occurred_on": "2026-09-03", "duration_minutes": 60, "session_type": "individual"},
+                      {"occurred_on": "2026-09-03", "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"},
                       format="json").status_code,
             403,
         )
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                     {"occurred_on": "2026-09-03", "duration_minutes": 120, "session_type": "individual",
-                     "client_observation": True}, format="json")
+                     "client_observation": True, "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                    {"occurred_on": "2026-09-17", "duration_minutes": 60, "session_type": "group"}, format="json")
+                    {"occurred_on": "2026-09-17", "duration_minutes": 60, "session_type": "group", "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         self.assertEqual(
             jordan.put(f"/api/v1/relationships/{self.rbt.id}/service-hours",
                        {"year": 2026, "month": 9, "hours": "60"}, format="json").status_code,
@@ -282,7 +282,7 @@ class MonthlyWorkAcceptanceTests(TestCase):
 
         # A session documented on the fieldwork relationship never enters the fieldwork calculation
         jordan.post(f"/api/v1/relationships/{self.fieldwork.id}/sessions",
-                    {"occurred_on": "2026-09-20", "duration_minutes": 600, "session_type": "individual"}, format="json")
+                    {"occurred_on": "2026-09-20", "duration_minutes": 600, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         verified = casey.get(f"/api/v1/relationships/{self.fieldwork.id}/compliance").data["months"][-1]
         self.assertEqual(verified["total_hours"], 20.0)
         self.assertEqual(verified["supervision_hours"], 1.0)
@@ -348,9 +348,9 @@ class MonthlyWorkAcceptanceTests(TestCase):
         ComplianceRuleParameter.objects.create(rule_set=rule_set, key="min_supervision_percent", value="10")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                     {"occurred_on": "2026-09-03", "duration_minutes": 180, "session_type": "individual",
-                     "client_observation": True}, format="json")
+                     "client_observation": True, "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                    {"occurred_on": "2026-09-10", "duration_minutes": 60, "session_type": "individual"}, format="json")
+                    {"occurred_on": "2026-09-10", "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 9, "hours": "80"}, format="json")
         month = alex.get(f"/api/v1/relationships/{self.rbt.id}/compliance").data["months"][-1]
         self.assertEqual(month["supervision_percent"], 5.0)
@@ -372,7 +372,7 @@ class MonthlyWorkAcceptanceTests(TestCase):
         alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "100"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                     {"occurred_on": "2026-10-14", "start_time": "10:00", "end_time": "11:00", "session_type": "individual",
-                     "meeting_method": "in_person", "client_observation": "true"})
+                     "meeting_method": "in_person", "client_observation": "true", "topics": "Supervision review"})
         issued = jordan.post(f"/api/v1/relationships/{self.rbt.id}/assignments",
                              {"title": "October task", "year": 2026, "month": 10, "due_on": "2026-10-30"}, format="json").data
         alex.post(f"/api/v1/assignments/{issued['id']}/submit", {"note": "done"})
@@ -423,7 +423,7 @@ class MonthlyWorkAcceptanceTests(TestCase):
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/assignments", {"title": "RBT task", "due_on": "2026-10-20"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.fieldwork.id}/assignments", {"title": "Fieldwork task", "due_on": "2026-10-20"}, format="json")
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                    {"occurred_on": "2026-10-05", "duration_minutes": 60, "session_type": "individual"}, format="json")
+                    {"occurred_on": "2026-10-05", "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         self.log_hours(casey, "2026-10-02", "5")
 
         mine = jordan.get("/api/v1/assignments").data
@@ -457,7 +457,7 @@ class MonthlyWorkAcceptanceTests(TestCase):
         alex.put(f"/api/v1/relationships/{self.rbt.id}/service-hours", {"year": 2026, "month": 10, "hours": "40"}, format="json")
 
         bad = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                          {"occurred_on": "2026-10-06", "start_time": "11:00", "end_time": "10:00", "session_type": "individual"},
+                          {"occurred_on": "2026-10-06", "start_time": "11:00", "end_time": "10:00", "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"},
                           format="json")
         self.assertEqual(bad.status_code, 400)
 

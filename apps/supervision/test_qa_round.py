@@ -39,7 +39,7 @@ class QaRoundTests(TestCase):
         return client
 
     def session(self, client, rel, day, **extra):
-        body = {"occurred_on": day, "start_time": "10:00", "end_time": "11:00", "session_type": "individual", "meeting_method": "in_person", **extra}
+        body = {"occurred_on": day, "start_time": "10:00", "end_time": "11:00", "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review", **extra}
         return client.post(f"/api/v1/relationships/{rel.id}/sessions", body, format="json")
 
     def month(self, client, rel, month):
@@ -89,12 +89,12 @@ class QaRoundTests(TestCase):
         end = timezone.localtime(start + timedelta(hours=1)).strftime("%H:%M")
         documented = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                                  {"occurred_on": day, "start_time": hhmm, "end_time": end, "session_type": "individual",
-                                  "meeting_method": "in_person", "appointment_id": appt["id"]}, format="json")
+                                  "meeting_method": "in_person", "appointment_id": appt["id"], "topics": "Supervision review"}, format="json")
         self.assertEqual(documented.status_code, 201, documented.data)
         self.assertEqual(jordan.get(f"/api/v1/appointments/{appt['id']}").data["session"]["id"], documented.data["id"])
         again = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                             {"occurred_on": day, "start_time": "23:00", "end_time": "23:30", "session_type": "individual",
-                             "appointment_id": appt["id"]}, format="json")
+                             "appointment_id": appt["id"], "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         self.assertEqual(again.status_code, 400)
         self.assertIn("already documented", str(again.data))
 

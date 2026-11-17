@@ -53,7 +53,7 @@ class ReviewAuditTests(TestCase):
                              {"title": "Ethics scenario", "due_on": "2026-08-20"}, format="json")
         self.assertEqual(issued.status_code, 201, issued.data)
         session = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                              {"occurred_on": "2026-08-10", "duration_minutes": 60, "session_type": "individual"}, format="json")
+                              {"occurred_on": "2026-08-10", "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
         self.assertEqual(session.status_code, 201, session.data)
         logged = casey.post(f"/api/v1/relationships/{self.fieldwork.id}/hours",
                             {"occurred_on": "2026-08-05", "hours": "6", "kind": "independent"}, format="json")

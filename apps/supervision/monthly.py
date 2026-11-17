@@ -475,6 +475,32 @@ def ensure_not_duplicate(session):
             )
 
 
+NARRATIVE_FIELDS = ("topics", "activities", "feedback", "follow_up", "notes")
+
+
+def ensure_complete_record(session):
+    """What a completed (compliance-bearing) record must have: the meeting method (whether it can count depends
+    on it) and documentation of what happened. A record without them stays a draft and never counts."""
+    missing = []
+    if not session.meeting_method:
+        missing.append("the meeting method")
+    if not any((getattr(session, f) or "").strip() for f in NARRATIVE_FIELDS):
+        missing.append("what happened in the session (topics, activities, feedback, follow-up or notes)")
+    if missing:
+        raise ValidationError(
+            "A completed session record needs " + ", ".join(missing)
+            + ". Save it as a draft and complete it once it is fully documented."
+        )
+
+
+def _lock_supervisee(session):
+    """Serializes completions for one supervisee, so two simultaneous submissions (a double click, two tabs)
+    can't both pass the duplicate check. Call inside a transaction."""
+    from apps.accounts.models import UserAccount
+
+    UserAccount.objects.select_for_update().filter(pk=session.cycle.relationship.supervisee_id).first()
+
+
 def ensure_not_future(session):
     """A session can't be recorded as completed before the day it happens (in the organization's
     time zone), so a future-dated record never counts toward requirements early."""
@@ -494,10 +520,13 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
     session.cycle = cycle_for_date(relationship, session.occurred_on)
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
     if not draft:
+        ensure_complete_record(session)
         ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
-        ensure_not_duplicate(session)
     with transaction.atomic():
+        if not draft:
+            _lock_supervisee(session)
+            ensure_not_duplicate(session)
         if appointment_id:
             link_session(session, _appointment(appointment_id))
         session.save()
@@ -517,11 +546,14 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
     if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
     if complete:
+        ensure_complete_record(session)
         ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
-        ensure_not_duplicate(session)
-        session.status = SessionStatus.COMPLETED
     with transaction.atomic():
+        if complete:
+            _lock_supervisee(session)
+            ensure_not_duplicate(session)
+            session.status = SessionStatus.COMPLETED
         session.save()
         _save_session_files(session, actor, files)
     return session

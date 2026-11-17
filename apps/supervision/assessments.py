@@ -100,6 +100,18 @@ def finalize(assessment):
     return assessment
 
 
+def rating_label(value):
+    return dict(CompetencyLevel.choices).get(value, value or "")
+
+
+def recorded_as(a):
+    from apps.supervision.models import LEGACY_LEVEL_LABELS, SCALE_RENAMED_ON
+
+    if a.created_at and a.created_at.date().isoformat() < SCALE_RENAMED_ON and a.rating in LEGACY_LEVEL_LABELS:
+        return LEGACY_LEVEL_LABELS[a.rating]
+    return None
+
+
 def serialize_assessment(a):
     return {
         "id": str(a.id),
@@ -115,6 +127,9 @@ def serialize_assessment(a):
         },
         "assessed_on": a.assessed_on.isoformat(),
         "rating": a.rating,
+        "rating_label": rating_label(a.rating),
+        # The name this level had when it was recorded, if the scale was renamed since (shown alongside, never replaced)
+        "recorded_as": recorded_as(a),
         "documented_content": a.documented_content,
         "status": a.status,
         "assessed_by": None if a.assessed_by_id is None else {"id": str(a.assessed_by_id), "name": a.assessed_by.full_name},

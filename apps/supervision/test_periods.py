@@ -43,7 +43,7 @@ class ReportingPeriodTests(TestCase):
     def session(self, client, rel, day, minutes, **extra):
         response = client.post(f"/api/v1/relationships/{rel.id}/sessions",
                                {"occurred_on": day, "duration_minutes": minutes, "session_type": "individual",
-                                "meeting_method": "in_person", **extra}, format="json")
+                                "meeting_method": "in_person", "topics": "Supervision review", **extra}, format="json")
         self.assertEqual(response.status_code, 201, response.data)
         return response.data
 
@@ -172,7 +172,7 @@ class ReportingPeriodTests(TestCase):
 
         # Closed: compliance-bearing changes are blocked and the stored snapshot is reported
         self.assertEqual(jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                                     {"occurred_on": "2026-06-20", "duration_minutes": 60, "session_type": "individual"}, format="json").status_code, 400)
+                                     {"occurred_on": "2026-06-20", "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"}, format="json").status_code, 400)
         blocked = self.attest(alex, 6, "50")
         self.assertEqual(blocked.status_code, 400)
         self.assertIn("closed", str(blocked.data))
@@ -198,7 +198,7 @@ class ReportingPeriodTests(TestCase):
         self.attest(alex, 8, "120")
         self.session(jordan, self.rbt, "2026-08-04", 210, client_observation=True)
         jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                    {"occurred_on": "2026-08-20", "duration_minutes": 75, "session_type": "group", "meeting_method": "remote"}, format="json")
+                    {"occurred_on": "2026-08-20", "duration_minutes": 75, "session_type": "group", "meeting_method": "remote", "topics": "Supervision review"}, format="json")
         self.session(morgan, self.second, "2026-08-25", 30)
 
         self.assertEqual(alex.patch(f"/api/v1/people/{self.jordan.id}/certification", {"certification_number": "1-01-11007"}, format="json").status_code, 403)
@@ -261,13 +261,13 @@ class ReportingPeriodTests(TestCase):
         # Future-dated sessions
         tomorrow = (timezone.localdate() + timedelta(days=2)).isoformat()
         refused = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
-                              {"occurred_on": tomorrow, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person"},
+                              {"occurred_on": tomorrow, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person", "topics": "Supervision review"},
                               format="json")
         self.assertEqual(refused.status_code, 400)
         self.assertIn("hasn't happened yet", str(refused.data))
         draft = jordan.post(f"/api/v1/relationships/{self.rbt.id}/sessions",
                             {"occurred_on": tomorrow, "duration_minutes": 60, "session_type": "individual", "meeting_method": "in_person",
-                             "draft": True}, format="json")
+                             "draft": True, "topics": "Supervision review"}, format="json")
         self.assertEqual(draft.status_code, 201, draft.data)
         # A future-dated completed record (e.g. imported earlier) doesn't count before its date
         future = date.fromisoformat(tomorrow)

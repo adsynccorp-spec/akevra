@@ -50,10 +50,20 @@ QUESTIONS = (
     ("next_focus", "What is the focus for next time?"),
 )
 ANSWER_KEYS = tuple(key for key, _ in QUESTIONS)
+# The Supervisor note's default structure for ABA supervision
+NOTE_SECTIONS = (
+    ("observations", "Observations and Supervisee Performance"),
+    ("activities_coaching", "Supervision Activities and Coaching"),
+    ("performance_feedback", "Performance Feedback"),
+    ("procedures_adjustments", "Procedures or Adjustments Discussed"),
+    ("follow_up_next_focus", "Follow-Up Actions and Next Supervision Focus"),
+)
 FIELDS = {
-    SessionDocKind.SUPERVISOR_NOTE: ("text",),
+    SessionDocKind.SUPERVISOR_NOTE: tuple(key for key, _ in NOTE_SECTIONS),
     SessionDocKind.SUPERVISEE_FEEDBACK: ("strengths", "improvements", "coaching", "follow_up"),
 }
+NOT_DOCUMENTED = "Not documented."
+SESSION_RECORD_FIELDS = ("topics", "activities", "feedback", "follow_up", "notes")
 MAX_ANSWER = 4000
 MAX_FIELD = 6000
 
@@ -72,6 +82,28 @@ def can_document(user, session):
 
 def is_own_supervisee(user, session):
     return user is not None and _relationship(session).supervisee_id == user.id
+
+
+def can_review(user, session):
+    """Authorized audit reviewers (for example a Clinical Director) may inspect the documentation and every
+    revision, read-only. Never the supervisee."""
+    return (not is_own_supervisee(user, session)
+            and has_permission(user, "audit.view", relationship=_relationship(session)))
+
+
+def _join(*parts):
+    return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+def prefill(session):
+    """Single entry: the guided answers start from what the session record already says, for the Supervisor to
+    review, correct or add to before drafting."""
+    return {
+        "observed": session.activities.strip(),
+        "feedback_given": session.feedback.strip(),
+        "changes_assigned": session.follow_up.strip(),
+        "next_focus": "",
+    }
 
 
 def _require_supervisor(user, session):
@@ -96,20 +128,23 @@ def build_context(documentation):
             "client_observation": session.client_observation,
         },
         "supervisor_answers": {key: getattr(documentation, key) for key in ANSWER_KEYS},
+        "session_record": {key: getattr(session, key) for key in SESSION_RECORD_FIELDS},
     }
 
 
 def _template(context, kind):
     """akevra-doc-template/1.0: arranges the Supervisor's own answers; adds nothing of its own."""
     a = context["supervisor_answers"]
-    s = context["session"]
+    record = context["session_record"]
     if kind == SessionDocKind.SUPERVISOR_NOTE:
-        lines = [f"Supervision session ({s['type']}, {s['duration_minutes']} min, {s['month']})."]
-        for key, label in (("observed", "Observed"), ("feedback_given", "Feedback and coaching provided"),
-                           ("changes_assigned", "Changes assigned"), ("next_focus", "Next focus")):
-            if a[key].strip():
-                lines.append(f"{label}: {a[key].strip()}")
-        return {"text": "\n".join(lines)}
+        follow_up = _join(a["changes_assigned"], f"Next supervision focus: {a['next_focus'].strip()}" if a["next_focus"].strip() else "")
+        return {
+            "observations": a["observed"].strip() or NOT_DOCUMENTED,
+            "activities_coaching": _join(record["activities"], record["notes"]) or a["feedback_given"].strip() or NOT_DOCUMENTED,
+            "performance_feedback": a["feedback_given"].strip() or record["feedback"].strip() or NOT_DOCUMENTED,
+            "procedures_adjustments": (f"Discussed: {record['topics'].strip()}" if record["topics"].strip() else NOT_DOCUMENTED),
+            "follow_up_next_focus": follow_up or NOT_DOCUMENTED,
+        }
     return {
         "strengths": a["observed"].strip(),
         "improvements": a["next_focus"].strip(),
@@ -124,8 +159,17 @@ dates, names or instructions that are not there. Some text may read [REDACTED]; 
 Write in plain professional language.
 
 Draft %(what)s.
-- "supervisor_note": the Supervisor's private session note, a short narrative of what was observed, the feedback
-  and coaching given, changes assigned and the next focus.
+- "supervisor_note": the Supervisor's private session note for ABA supervision, in five sections:
+  "observations": what the Supervisor directly observed: supervisee skills, strengths, areas needing improvement and
+     objective performance data when available. Distinguish direct observation from information reported by others.
+  "activities_coaching": supervision activities such as case discussion, modelling, role-play, behavioral skills
+     training or performance practice, the procedures used, how they were implemented and the supervisee's response.
+  "performance_feedback": specific strengths, areas requiring improvement, corrective feedback and guidance given.
+  "procedures_adjustments": clinical procedures, implementation recommendations or treatment-related adjustments.
+     Clearly separate what was only discussed from changes actually approved or implemented.
+  "follow_up_next_focus": agreed assignments and action steps (with who is responsible when stated) and the
+     priorities for the next supervision session.
+  Write "Not documented." for a section the information below doesn't cover.
 - "supervisee_feedback": a supportive summary written to the supervisee, with four parts: strengths observed,
   areas to improve, the coaching given, and follow-up actions.
 
@@ -136,7 +180,8 @@ Session details and the Supervisor's answers:
 %(context)s"""
 
 _SHAPES = {
-    SessionDocKind.SUPERVISOR_NOTE: '"supervisor_note": {"text": "<note>"}',
+    SessionDocKind.SUPERVISOR_NOTE: '"supervisor_note": {"observations": "<...>", "activities_coaching": "<...>", '
+                                    '"performance_feedback": "<...>", "procedures_adjustments": "<...>", "follow_up_next_focus": "<...>"}',
     SessionDocKind.SUPERVISEE_FEEDBACK: '"supervisee_feedback": {"strengths": "<...>", "improvements": "<...>", '
                                         '"coaching": "<...>", "follow_up": "<...>"}',
 }
@@ -304,7 +349,9 @@ def edit(session, actor, kind, content, *, request=None):
         output = _output(documentation, kind)
         if output.status == SessionDocStatus.APPROVED:
             raise ValidationError("This output is approved and can no longer be edited.")
-        final = {field: str(content.get(field, output.content.get(field, "")) or "").strip() for field in FIELDS[kind]}
+        # The current structure, plus any part an earlier draft had (an older single-text note keeps its text)
+        keys = list(FIELDS[kind]) + [k for k in output.content if k not in FIELDS[kind]]
+        final = {field: str(content.get(field, output.content.get(field, "")) or "").strip() for field in keys}
         if any(len(v) > MAX_FIELD for v in final.values()):
             raise ValidationError(f"Keep each part under {MAX_FIELD} characters.")
         if final == output.content:
@@ -398,13 +445,16 @@ def serialize(session, viewer):
                                        "drafts__requested_by", "events__actor").first())
     supervisor = can_document(viewer, session)
     supervisee = is_own_supervisee(viewer, session)
+    reviewer = not supervisor and can_review(viewer, session)
     base = {"session_id": str(session.id), "questions": [{"key": k, "label": label} for k, label in QUESTIONS],
-            "can_document": supervisor, "can_acknowledge": False,
+            "note_sections": [{"key": k, "label": label} for k, label in NOTE_SECTIONS] if supervisor or reviewer else [],
+            "can_document": supervisor, "can_review": reviewer, "can_acknowledge": False,
             "generator": ai.generator_info(_relationship(session).organization) if supervisor else None}
     if documentation is None:
-        return {**base, "exists": False, "outputs": {}}
+        extra = {"prefill": prefill(session)} if supervisor else {}
+        return {**base, "exists": False, "outputs": {}, **extra}
     outputs = {o.kind: o for o in documentation.outputs.all()}
-    if supervisor:
+    if supervisor or reviewer:
         return {
             **base, "exists": True, "id": str(documentation.id),
             "answers": {k: getattr(documentation, k) for k in ANSWER_KEYS},

@@ -282,7 +282,7 @@ def prepare_plan_items(*, relationship, goals=None, competencies=None, milestone
             raise ValidationError(f"Competency {index}: unknown current level '{current}'.")
         if target and target not in TARGET_LEVELS:
             raise ValidationError(
-                f"Competency {index}: target level must be Developing, Performs With Support, or Independent."
+                f"Competency {index}: target level must be Emerging, Developing, or Proficient."
             )
         # Equal is allowed (maintenance, generalization, refinement); lower is not
         if current and target and COMPETENCY_LEVEL_ORDER.index(target) < COMPETENCY_LEVEL_ORDER.index(current):

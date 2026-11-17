@@ -43,7 +43,7 @@ class OverviewTests(TestCase):
             response = client["jordan"].post(
                 f"/api/v1/relationships/{self.rbt.id}/sessions",
                 {"occurred_on": f"{year}-{month:02d}-{day:02d}", "duration_minutes": minutes, "session_type": "individual",
-                 "client_observation": observation}, format="json")
+                 "client_observation": observation, "meeting_method": "in_person", "topics": "Supervision review"}, format="json")
             self.assertEqual(response.status_code, 201, response.data)
         attested = client["alex"].put(f"/api/v1/relationships/{self.rbt.id}/service-hours",
                                       {"year": year, "month": month, "hours": str(hours)}, format="json")

@@ -71,7 +71,7 @@ class PlanCompetencySerializer(serializers.Serializer):
     name = serializers.CharField(help_text="A plan-library label is tagged with that entry's ID, domain and pathways; other text is a custom competency")
     domain = serializers.ChoiceField(choices=DEVELOPMENT_DOMAIN_CHOICES, required=False, allow_blank=True, help_text="Used for custom competencies only")
     description = serializers.CharField(required=False, allow_blank=True)
-    target_level = serializers.ChoiceField(choices=CompetencyLevel.choices, required=False, allow_blank=True, help_text="Developing, Performs With Support or Independent; may equal current_level")
+    target_level = serializers.ChoiceField(choices=CompetencyLevel.choices, required=False, allow_blank=True, help_text="Emerging, Developing or Proficient; may equal current_level")
     current_level = serializers.ChoiceField(choices=CompetencyLevel.choices, required=False, allow_blank=True)
     sort_order = serializers.IntegerField(required=False)
 

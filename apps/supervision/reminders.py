@@ -23,12 +23,17 @@ def _fmt(value):
 
 def shortfalls(cycle):
     """What the month's result says is missing: {check_key: message}. Read-only."""
-    from apps.supervision.compliance import cycle_compliance
+    from apps.supervision.compliance import cycle_compliance, organization_today
 
+    today = organization_today(cycle.organization)
+    if (cycle.year, cycle.month) > (today.year, today.month):
+        return {}  # a month that hasn't started has nothing missing yet
+    month_over = (cycle.year, cycle.month) < (today.year, today.month)
     result = cycle_compliance(cycle)
     month = date(cycle.year, cycle.month, 1).strftime("%b %Y")
     found = {}
-    if result.get("status") == "awaiting_service_hours":
+    # Service hours are attested once the month is over, so they can't be missing before that
+    if result.get("status") == "awaiting_service_hours" and month_over:
         found["service_hours"] = f"{month}: monthly service hours haven't been attested yet."
     results = [result] + list((result.get("by_standard") or {}).values())
     for res in results:

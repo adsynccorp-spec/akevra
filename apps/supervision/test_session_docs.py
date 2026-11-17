@@ -38,7 +38,8 @@ class SessionDocumentationTests(TestCase):
         self.addCleanup(patcher.stop)
         self.jordan_c = self.as_user("jordan@akevra.test")
         body = {"occurred_on": "2026-10-06", "start_time": "10:00", "end_time": "11:00", "session_type": "individual",
-                "meeting_method": "in_person"}
+                "meeting_method": "in_person", "topics": "DTT data collection review",
+                "activities": "Observed DTT and modelled error correction"}
         created = self.jordan_c.post(f"/api/v1/relationships/{self.rbt.id}/sessions", body, format="json")
         self.assertEqual(created.status_code, 201, created.data)
         self.sid = created.data["id"]
@@ -64,7 +65,11 @@ class SessionDocumentationTests(TestCase):
         self.assertEqual(self.jordan_c.post(f"{self.base}/generate", {}, format="json").status_code, 400)  # answers first
         data = self.drafted()
         self.assertEqual(set(data["outputs"]), {"supervisor_note", "supervisee_feedback"})
-        self.assertIn("Record data within the trial", data["outputs"]["supervisor_note"]["content"]["text"])
+        note = data["outputs"]["supervisor_note"]["content"]
+        self.assertEqual(set(note), {"observations", "activities_coaching", "performance_feedback",
+                                     "procedures_adjustments", "follow_up_next_focus"})  # structured sections
+        self.assertIn("Record data within the trial", note["follow_up_next_focus"])
+        self.assertEqual(note["procedures_adjustments"], "Discussed: DTT data collection review")
         self.assertEqual(data["outputs"]["supervisee_feedback"]["content"]["follow_up"], ANSWERS["changes_assigned"])
         doc = SessionDocumentation.objects.get(session_id=self.sid)
         self.assertEqual(doc.session.cycle.relationship_id, self.rbt.id)
@@ -101,14 +106,16 @@ class SessionDocumentationTests(TestCase):
         self.jordan_c.post(f"{self.base}/supervisee_feedback/approve", {}, format="json")
         alex_view = json.dumps(self.as_user("alex@akevra.test").get(self.base).data)
         self.assertNotIn("supervisor_note", alex_view)
-        self.assertNotIn("Supervision session (", alex_view)  # the note's text
+        self.assertNotIn('"observations"', alex_view)  # the note's text
         self.assertNotIn('"answers"', alex_view)  # the raw answers aren't shared, only the approved summary
         self.assertNotIn('"prompt"', alex_view)
-        director = self.as_user("director@akevra.test").get(self.base).data  # oversight: status only, no text
-        self.assertEqual(director["outputs"]["supervisor_note"], {"kind": "supervisor_note", "status": "approved",
-                                                                   "approved_at": director["outputs"]["supervisor_note"]["approved_at"],
-                                                                   "acknowledged_at": None})
-        self.assertNotIn("content", json.dumps(director))
+        # An authorized audit reviewer (Clinical Director) inspects everything read-only
+        director_c = self.as_user("director@akevra.test")
+        director = director_c.get(self.base).data
+        self.assertTrue(director["can_review"])
+        self.assertFalse(director["can_document"])
+        self.assertIn("observations", director["outputs"]["supervisor_note"]["content"])
+        self.assertEqual(director_c.put(self.base, {"observed": "x"}, format="json").status_code, 403)
         self.assertEqual(self.as_user("summit.supervisor@akevra.test").get(self.base).status_code, 404)  # other org
         self.assertEqual(self.as_user("morgan@akevra.test").get("/api/v1/my-feedback").data["feedback"], [])
         # Only the Supervisor writes
@@ -167,7 +174,8 @@ class SessionDocumentationTests(TestCase):
     def test_ai_drafts_use_redacted_context_only_when_enabled(self):
         org = self.rbt.organization
         reply = {"model": "claude-sonnet-5-5", "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({
-            "supervisor_note": {"text": "Note"},
+            "supervisor_note": {"observations": "Obs", "activities_coaching": "BST", "performance_feedback": "PF",
+                                "procedures_adjustments": "Discussed only", "follow_up_next_focus": "Next"},
             "supervisee_feedback": {"strengths": "S", "improvements": "I", "coaching": "C", "follow_up": "F"}})}]}
         response = mock.MagicMock()
         response.__enter__.return_value = io.BytesIO(json.dumps(reply).encode())
@@ -189,3 +197,19 @@ class SessionDocumentationTests(TestCase):
         latest = data["drafts"][-1]
         self.assertEqual((latest["model_name"], latest["prompt"]), ("claude-sonnet-5-5", sent))
         self.assertEqual(latest["redactions"], 2)
+
+    # Single entry: the guided answers start from the session record
+    def test_guided_answers_are_prefilled_from_the_session_record(self):
+        data = self.jordan_c.get(self.base).data
+        self.assertEqual(data["prefill"]["observed"], "Observed DTT and modelled error correction")
+        self.assertNotIn("prefill", self.as_user("alex@akevra.test").get(self.base).data)
+
+    # Audit: reviewers see the original draft and every revision
+    def test_reviewers_can_inspect_original_and_revised_text(self):
+        self.drafted()
+        self.jordan_c.patch(f"{self.base}/supervisor_note", {"content": {"observations": "Revised observation."}}, format="json")
+        review = self.as_user("director@akevra.test").get(self.base).data
+        original = review["drafts"][0]["content"]["observations"]
+        edit = next(e for e in review["events"] if e["action"] == "edited")
+        self.assertEqual((edit["detail"]["before"]["observations"], edit["detail"]["after"]["observations"]),
+                         (original, "Revised observation."))

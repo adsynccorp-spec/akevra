@@ -122,11 +122,24 @@ GOAL_CATEGORY_CHOICES = _DOMAINS + [("professional_growth", "Professional Growth
 
 
 class CompetencyLevel(models.TextChoices):
+    """The agreed developmental scale (M6 reference v1.2). The stored values are the four ordered levels and
+    never change; only the names shown changed on 2026-11-18. Level 1-4 keep their meaning, so a rating
+    recorded before the change is shown with its earlier name alongside (LEGACY_LEVEL_LABELS)."""
     NOT_YET_ASSESSED = "not_yet_assessed", "Not Yet Assessed"
-    NEEDS_TRAINING = "needs_training", "Needs Training"
-    DEVELOPING = "developing", "Developing"
-    PERFORMS_WITH_SUPPORT = "performs_with_support", "Performs With Support"
-    INDEPENDENT = "independent", "Independent"
+    NEEDS_TRAINING = "needs_training", "Not Yet Demonstrated"  # level 1
+    DEVELOPING = "developing", "Emerging"  # level 2
+    PERFORMS_WITH_SUPPORT = "performs_with_support", "Developing"  # level 3
+    INDEPENDENT = "independent", "Proficient"  # level 4
+
+
+# Names the same stored levels had before 2026-11-18 (shown on earlier records, never silently replaced)
+LEGACY_LEVEL_LABELS = {
+    "needs_training": "Needs Training",
+    "developing": "Developing",
+    "performs_with_support": "Performs With Support",
+    "independent": "Independent",
+}
+SCALE_RENAMED_ON = "2026-11-18"
 
 
 # Ordered lowest to highest; a target may equal the current level (maintenance, generalization, refinement)
@@ -1155,6 +1168,9 @@ class SuggestionDisposition(models.TextChoices):
     EDITED = "edited_accepted", "Edited and accepted"
     REJECTED = "rejected", "Rejected"
     SUPERSEDED = "superseded", "Superseded"
+    # A suggestion that isn't a supervisee goal (a compliance, administrative or missing-information item) is
+    # noted by the Supervisor; it never enters the development plan
+    ACKNOWLEDGED = "acknowledged", "Noted"
 
 
 class PresentationMode(models.TextChoices):
