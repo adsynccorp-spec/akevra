@@ -815,8 +815,13 @@ def cycle_compliance(cycle, *, live=False):
             # A verified month keeps its stored result. If today's calculation (current rules and records) would
             # differ, it is shown alongside, so a reviewer can decide whether to reopen the month (with a reason)
             fresh = cycle_compliance(cycle, live=True)
-            if fresh.get("status") != stored.get("status") or _check_states(fresh) != _check_states(stored):
-                stored["recalculation"] = {"status": fresh.get("status"), "met": fresh.get("met"), "checks": fresh.get("checks", [])}
+            differs = fresh.get("status") != stored.get("status") or _check_states(fresh) != _check_states(stored)
+            # A month verified before the 2-week check listed its periods gets the period-by-period detail too
+            stored_bw = next((c for c in stored.get("checks", []) if c.get("key") == "biweekly_minutes"), None)
+            needs_periods = stored_bw is not None and not (stored_bw.get("intervals") or [{}])[0].get("start")
+            if differs or needs_periods:
+                stored["recalculation"] = {"status": fresh.get("status"), "met": fresh.get("met"), "differs": differs,
+                                           "checks": fresh.get("checks", [])}
         return stored
     track = cycle.relationship.supervision_track
     if track == SupervisionTrack.SUPERVISED_FIELDWORK:

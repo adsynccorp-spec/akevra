@@ -222,3 +222,29 @@ class QARound5Tests(TestCase):
         october, november = months[(2026, 10)], months[(2026, 11)]
         self.assertEqual((october["rules"]["name"], october["required_supervision_percent"]), ("Set A", 5.0))
         self.assertEqual((november["rules"]["name"], november["required_supervision_percent"]), ("Set B", 7.0))
+
+    def test_a_month_verified_before_period_detail_shows_its_periods_and_keeps_its_result(self):
+        from apps.supervision.models import MonthlyCycle
+
+        rel = self.bcaba(date(2026, 10, 15))
+        self.session(rel, date(2026, 10, 15), 60)
+        self.biweekly(rel, 2026, 10)
+        jordan = self.as_user("jordan@akevra.test")
+        cycle = cycle_for_date(rel, date(2026, 10, 1))
+        with mock.patch("apps.supervision.compliance.organization_today", return_value=LATER):
+            self.assertEqual(jordan.post(f"/api/v1/cycles/{cycle.id}/status", {"status": "closed"}, format="json").status_code, 200)
+        # As stored by the earlier half-month check (no period dates)
+        cycle.refresh_from_db()
+        snap = cycle.closed_snapshot
+        for check in snap["result"]["checks"]:
+            if check["key"] == "biweekly_minutes":
+                check["intervals"] = [{"half": 2, "minutes": 60, "status": "met"}]
+        MonthlyCycle.objects.filter(pk=cycle.pk).update(closed_snapshot=snap)
+        cycle.refresh_from_db()
+        with mock.patch("apps.supervision.compliance.organization_today", return_value=LATER):
+            result = cycle_compliance(cycle)
+        self.assertEqual(result["status"], snap["result"]["status"])           # the verified result is kept
+        detail = next(c for c in result["recalculation"]["checks"] if c["key"] == "biweekly_minutes")
+        self.assertFalse(result["recalculation"]["differs"])
+        self.assertEqual([(i["start"], i["status"]) for i in detail["intervals"]],
+                         [("2026-10-15", "met"), ("2026-10-29", "judged_next_month")])
