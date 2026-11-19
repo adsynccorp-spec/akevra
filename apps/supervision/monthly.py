@@ -779,8 +779,12 @@ def serialize_session(session, flags=None):
         "cycle_id": str(session.cycle_id),
         "status": session.status,
         "appointment_id": str(session.appointment_id) if session.appointment_id else None,
-        # Completed and real-time (in person or live video): the only records that count
-        "qualifies": session.status == SessionStatus.COMPLETED and session.meeting_method in QUALIFYING_MEETING_METHODS,
+        # Completed, active and real-time (in person or live video): the only records that count
+        "qualifies": session.status == SessionStatus.COMPLETED and session.record_status == "active"
+        and session.meeting_method in QUALIFYING_MEETING_METHODS,
+        # Archived records are kept (with their history) for audit review and never count
+        "record_status": session.record_status,
+        "archived_at": session.archived_at.isoformat() if session.archived_at else None,
         "occurred_on": session.occurred_on.isoformat(),
         "start_time": session.start_time.strftime("%H:%M") if session.start_time else None,
         "end_time": session.end_time.strftime("%H:%M") if session.end_time else None,

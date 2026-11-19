@@ -592,8 +592,11 @@ class SessionListView(APIView):
             return _not_found()
         if denied := _denied(request, "session.view", rel, "supervision_session", "list"):
             return denied
+        # ?archived=1 (audit review): also the archived records, which stay excluded from every calculation
+        auditor = any(has_permission(request.user_account, perm, relationship=rel) for perm in ("session.document", "audit.view"))
+        statuses = ["active", "archived"] if auditor and request.query_params.get("archived") in ("1", "true") else ["active"]
         qs = _visible_sessions(request, (
-            SupervisionSession.objects.filter(cycle__relationship=rel, record_status="active")
+            SupervisionSession.objects.filter(cycle__relationship=rel, record_status__in=statuses)
             .select_related("documented_by")
             .prefetch_related("attachments")
             .order_by("-occurred_on", "-created_at")
@@ -606,6 +609,7 @@ class SessionListView(APIView):
         return Response({
             "can_document": can_document,
             "sessions": [monthly.serialize_session(s, flags.get(s.pk, [])) for s in qs],
+            "archived_count": SupervisionSession.objects.filter(cycle__relationship=rel, record_status="archived").count() if auditor else 0,
         })
 
     @extend_schema(tags=["Sessions"], summary="Document a supervision session, or save a draft (Supervisor)", request={"multipart/form-data": SessionCreateSerializer, "application/json": SessionCreateSerializer}, operation_id="sessions_create", responses=JSON_RESPONSE)

@@ -589,6 +589,26 @@ def redact_for_ai(context, organization):
     return walk(context), count
 
 
+class RedactionError(Exception):
+    """Redaction could not be completed or verified, so nothing may be sent to the AI provider."""
+
+
+def safe_context_for_ai(context, organization):
+    """Fail closed: the redacted copy and the number of replacements, verified before anything leaves AKEVRA. If
+    redaction raises, or an email or a name/term of the organization is still present afterwards, RedactionError is
+    raised and the caller must not contact the provider (it uses the local generator instead). There is no setting
+    or parameter that skips this step."""
+    try:
+        safe, count = redact_for_ai(context, organization)
+        text = json.dumps(safe, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 — any failure blocks sending
+        raise RedactionError(f"redaction failed: {type(exc).__name__}") from exc
+    if _EMAIL.search(text) or any(re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.IGNORECASE)
+                                  for term in _org_terms(organization)):
+        raise RedactionError("identifiers remained after redaction")
+    return safe, count
+
+
 def _rules_prompt(context, items):
     """For the rule generator the 'prompt' is the serialized rule input: generator, the rules that fired, the context."""
     return json.dumps(
@@ -602,9 +622,11 @@ def _generate_items(context, organization):
     the organization opted in; what it receives is the redacted context, and that is what the prompt records."""
     key = _api_key()
     if key and organization.ai_enabled:
-        safe, redactions = redact_for_ai(context, organization)
         try:
+            safe, redactions = safe_context_for_ai(context, organization)
             return (*_ai_generate(safe, key), redactions)
+        except RedactionError as exc:
+            logger.warning("AI not contacted (privacy safeguard), using %s instead: %s", RULES_GENERATOR, exc)
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.warning("AI suggestion request failed, using %s instead: %s", RULES_GENERATOR, exc)
     items = _rules_generate(context)

@@ -483,3 +483,25 @@ class AITeachingAssistantTests(TestCase):
         self.assertEqual(item["type"], "compliance_responsibility")  # compliance records only
         item = ai.classify({"type": "competency_goal", "evidence": [{"text": "Rated Emerging", "category": "official_assessment", "strength": "strong"}]})
         self.assertEqual(item["type"], "competency_goal")
+
+
+class AIFailureSafetyTests(TestCase):
+    """M7: a failure part-way through generating suggestions leaves nothing half-written."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_sprint0", verbosity=0)
+        cls.jordan = UserAccount.objects.get(email="jordan@akevra.test")
+        cls.alex = UserAccount.objects.get(email="alex@akevra.test")
+        cls.rbt = SupervisoryRelationship.objects.get(supervisor=cls.jordan, supervisee=cls.alex)
+
+    def test_an_error_while_saving_rolls_back_the_whole_batch(self):
+        from apps.supervision.models import AISuggestion
+
+        first = ai.generate(self.rbt, self.jordan)
+        pending_before = set(AISuggestion.objects.filter(disposition="pending").values_list("id", flat=True))
+        with mock.patch.object(ai, "_event", side_effect=RuntimeError("database hiccup")):
+            with self.assertRaises(RuntimeError):
+                ai.generate(self.rbt, self.jordan)
+        self.assertEqual(set(AISuggestion.objects.filter(disposition="pending").values_list("id", flat=True)), pending_before)
+        self.assertEqual(AISuggestion.objects.filter(relationship=self.rbt).count(), len(first))

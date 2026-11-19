@@ -230,9 +230,11 @@ def _generate(documentation, kinds):
     organization = _relationship(documentation.session).organization
     key = ai._api_key()
     if key and organization.ai_enabled:
-        safe, redactions = ai.redact_for_ai(context, organization)
         try:
+            safe, redactions = ai.safe_context_for_ai(context, organization)
             return (*_ai_drafts(safe, kinds, key), redactions)
+        except ai.RedactionError as exc:
+            logger.warning("AI not contacted (privacy safeguard), using %s instead: %s", TEMPLATE_GENERATOR, exc)
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.warning("AI session drafting failed, using %s instead: %s", TEMPLATE_GENERATOR, exc)
     prompt = json.dumps({"generator": TEMPLATE_GENERATOR, "kinds": list(kinds), "context": context}, sort_keys=True, indent=2)

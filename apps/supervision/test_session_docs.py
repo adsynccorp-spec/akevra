@@ -213,3 +213,55 @@ class SessionDocumentationTests(TestCase):
         edit = next(e for e in review["events"] if e["action"] == "edited")
         self.assertEqual((edit["detail"]["before"]["observations"], edit["detail"]["after"]["observations"]),
                          (original, "Revised observation."))
+
+    # M7 privacy: redaction fails closed and can't be switched off
+    def test_ai_is_never_contacted_when_redaction_fails_or_leaves_identifiers(self):
+        org = self.rbt.organization
+        org.ai_enabled = True
+        org.save(update_fields=["ai_enabled", "updated_at"])
+        self.jordan_c.put(self.base, {**ANSWERS, "observed": "Alex Rivera ran DTT."}, format="json")
+        with mock.patch.object(ai, "_api_key", return_value="k"), \
+                mock.patch.object(ai, "redact_for_ai", side_effect=RuntimeError("boom")), \
+                mock.patch("urllib.request.urlopen") as urlopen:
+            failed = self.jordan_c.post(f"{self.base}/generate", {}, format="json")
+        urlopen.assert_not_called()
+        self.assertEqual((failed.status_code, failed.data["drafts"][-1]["model_name"]), (200, session_docs.TEMPLATE_GENERATOR))
+        # A redaction that leaves a name in place is caught before sending
+        with mock.patch.object(ai, "_api_key", return_value="k"), \
+                mock.patch.object(ai, "redact_for_ai", side_effect=lambda context, organization: (context, 0)), \
+                mock.patch("urllib.request.urlopen") as urlopen:
+            self.jordan_c.post(f"{self.base}/generate", {}, format="json")
+        urlopen.assert_not_called()
+        # No override: a request asking to skip redaction is still redacted
+        reply = {"model": "claude-sonnet-5-5", "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({
+            "supervisor_note": {"observations": "O", "activities_coaching": "A", "performance_feedback": "P",
+                                "procedures_adjustments": "D", "follow_up_next_focus": "N"},
+            "supervisee_feedback": {"strengths": "S", "improvements": "I", "coaching": "C", "follow_up": "F"}})}]}
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(reply).encode())
+        with mock.patch.object(ai, "_api_key", return_value="k"), \
+                mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
+            self.jordan_c.post(f"{self.base}/generate", {"redact": False, "skip_redaction": True}, format="json")
+        sent = json.loads(urlopen.call_args.args[0].data)["messages"][0]["content"]
+        self.assertNotIn("Alex", sent)
+        self.assertIn("[REDACTED]", sent)
+
+    # M7 reliability: a provider error loses nothing and changes no approved record
+    def test_provider_error_keeps_answers_and_approved_outputs(self):
+        data = self.drafted()
+        approved = self.jordan_c.post(f"{self.base}/supervisor_note/approve", {}, format="json")
+        self.assertEqual(approved.status_code, 200, approved.data)
+        before = self.jordan_c.get(self.base).data
+        org = self.rbt.organization
+        org.ai_enabled = True
+        org.save(update_fields=["ai_enabled", "updated_at"])
+        with mock.patch.object(ai, "_api_key", return_value="k"), \
+                mock.patch("urllib.request.urlopen", side_effect=OSError("provider down")):
+            again = self.jordan_c.post(f"{self.base}/generate", {}, format="json")
+        after = self.jordan_c.get(self.base).data
+        self.assertIn(again.status_code, (200, 400))
+        self.assertEqual(after["answers"] if "answers" in after else after.get("documentation"),
+                         before["answers"] if "answers" in before else before.get("documentation"))
+        self.assertEqual(after["outputs"]["supervisor_note"]["content"], before["outputs"]["supervisor_note"]["content"])
+        self.assertEqual(after["outputs"]["supervisor_note"]["status"], "approved")
+        self.assertGreaterEqual(len(after["drafts"]), len(data["drafts"]))

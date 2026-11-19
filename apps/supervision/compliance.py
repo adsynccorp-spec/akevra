@@ -24,7 +24,8 @@ Sources for the defaults (BACB handbooks, updated 06/2026):
   more than individual, observation each quarter) and the 2027 ongoing requirements.
 """
 
-from datetime import date
+import calendar
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.db.models import Count, Q, Sum
@@ -379,7 +380,7 @@ def evaluate_fieldwork_cumulative(rules, months, *, unrestricted_hours=None, acc
 def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contacts, individual_contacts,
                            observation_contacts, group_minutes=0, first_half_minutes=None,
                            second_half_minutes=None, prior_service_hours=0, quarter_observations=None,
-                           quarter_end=False, open_halves=()):
+                           quarter_end=False, open_halves=(), biweekly_periods=None):
     """One month: supervision time from Supervisor-authored sessions over the Supervisee's
     self-attested service hours. `service_hours` is None until the Supervisee attests.
     Only the checks whose parameters the rules define are applied, so RBT and BCaBA share it."""
@@ -430,7 +431,9 @@ def evaluate_ongoing_month(rules, *, service_hours, supervision_minutes, contact
                              _out(share), share <= limit))
     # A half passed as None isn't required (e.g. the relationship started after it ended)
     halves = [(i, minutes) for i, minutes in enumerate((first_half_minutes, second_half_minutes)) if minutes is not None]
-    if rules.has("biweekly_min_minutes") and not reduced_tier and halves:
+    if rules.has("biweekly_min_minutes") and not reduced_tier and biweekly_periods:
+        checks.append(_biweekly_check(int(rules.number("biweekly_min_minutes")), biweekly_periods))
+    elif rules.has("biweekly_min_minutes") and not reduced_tier and halves and biweekly_periods is None:
         needed = int(rules.number("biweekly_min_minutes"))
         # A half still running and not yet covered is "In Progress", not failed; an ended half short of it is "Below"
         ended_short = [m for i, m in halves if m < needed and i not in open_halves]
@@ -549,6 +552,7 @@ def _fieldwork_result(cycle, rules_by_standard):
         "approved": all(s.get("approved") for s in sources),
         "parameters_by_standard": {s: dict(sorted(rules_by_standard[s].values.items())) for s in results},
     }
+    eligible_by_standard = {s: r["_eligible"] for s, r in results.items()}
     return {
         **low,
         "status": "met" if met else "shortfall",
@@ -556,6 +560,12 @@ def _fieldwork_result(cycle, rules_by_standard):
         "checks": checks,
         "adjustments": adjustments,
         "standard": "both",
+        # Undetermined standard: nothing is excluded for good. Each standard's eligible hours are kept; the
+        # provisional figure is the lower one, and the difference waits on the standard decision (once it is set,
+        # the month uses that standard's own figure, including a verified month's stored one)
+        "provisional": True,
+        "eligible_by_standard": {s: _out(v) for s, v in eligible_by_standard.items()},
+        "pending_standard_hours": _out(max(eligible_by_standard.values()) - min(eligible_by_standard.values())),
         "by_standard": {s: {k: v for k, v in r.items() if k != "_eligible"} for s, r in results.items()},
     }, source
 
@@ -659,6 +669,7 @@ def _ongoing_month_for(cycle, rules):
         quarter_observations=quarter_observations,
         quarter_end=cycle.month % 3 == 0,
         open_halves=_open_halves(cycle),
+        biweekly_periods=biweekly_periods(rel, cycle),
     )
     result["service_hours_record"] = None if record is None else {
         "id": str(record.id), "hours": _out(record.hours), "zero_reason": record.zero_reason,
@@ -724,6 +735,70 @@ def rules_date(relationship, cycle, standard=None):
     return day
 
 
+def _biweekly_check(needed, periods):
+    """BCaBA Handbook: no less than 1 hour of supervision every 2 weeks during the first 1,000 post-certification
+    hours. Each consecutive 14-day period from the relationship's start is checked on its own (minutes of this
+    relationship's qualifying sessions dated within it), never from the month's total. A period is judged in the
+    month it ends; one that runs into the next month is shown here and judged there. A period still running and
+    not yet covered is "In Progress", not failed."""
+    intervals = []
+    for p in periods:
+        covered = p["minutes"] >= needed
+        if covered:
+            status = "met"
+        elif p["open"]:
+            status = "in_progress"
+        elif not p["judged_here"]:
+            status = "judged_next_month"
+        else:
+            status = "not_met"
+        intervals.append({
+            "start": p["start"].isoformat(), "end": p["end"].isoformat(), "minutes": p["minutes"],
+            "required_minutes": needed, "status": status, "judged_here": p["judged_here"], "partial": p.get("partial", False),
+        })
+    judged = [i for i in intervals if i["judged_here"]] or intervals
+    failed = any(i["status"] == "not_met" for i in judged)
+    running = any(i["status"] == "in_progress" for i in intervals)
+    status = "not_met" if failed else ("in_progress" if running else "met")
+    least = min(i["minutes"] for i in judged)
+    check = _check("biweekly_minutes", "At least 1 hour in every 2-week period (first 1,000 hours)",
+                   needed, least, not failed, status=status)
+    check.update({"unit": "minutes", "intervals": intervals})
+    return check
+
+
+def biweekly_periods(relationship, cycle):
+    """The consecutive 14-day supervision periods, counted from the relationship's start date, that overlap this
+    month, each with the minutes of this relationship's qualifying sessions dated within it (across month ends)."""
+    first = date(cycle.year, cycle.month, 1)
+    last = date(cycle.year, cycle.month, calendar.monthrange(cycle.year, cycle.month)[1])
+    anchor = relationship.started_on
+    if anchor > last:
+        return []
+    today = organization_today(relationship.organization)
+    periods = []
+    k = max(0, (first - anchor).days // 14)
+    while True:
+        start = anchor + timedelta(days=14 * k)
+        if start > last or (relationship.ended_on and start > relationship.ended_on):
+            break
+        end = start + timedelta(days=13)
+        partial = False
+        if relationship.ended_on and end > relationship.ended_on:
+            end, partial = relationship.ended_on, True
+        if end >= first:
+            minutes = _supervisee_sessions(relationship, cycle__relationship=relationship).filter(
+                occurred_on__gte=start, occurred_on__lte=end).aggregate(t=Sum("duration_minutes"))["t"] or 0
+            periods.append({"start": start, "end": end, "minutes": int(minutes), "open": end >= today,
+                            "judged_here": first <= end <= last, "partial": partial})
+        k += 1
+    return periods
+
+
+def _check_states(result):
+    return {c["key"]: c.get("status") or ("met" if c.get("met") else "not_met") for c in result.get("checks", [])}
+
+
 def _snapshot_result(cycle):
     """A closed month reports what was stored when it was closed."""
     if cycle.status != "closed" or not cycle.closed_snapshot:
@@ -736,6 +811,12 @@ def _snapshot_result(cycle):
 def cycle_compliance(cycle, *, live=False):
     """The month's result. `live=True` recalculates even for a closed month (used to build the snapshot)."""
     if not live and (stored := _snapshot_result(cycle)):
+        if cycle.relationship.supervision_track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):
+            # A verified month keeps its stored result. If today's calculation (current rules and records) would
+            # differ, it is shown alongside, so a reviewer can decide whether to reopen the month (with a reason)
+            fresh = cycle_compliance(cycle, live=True)
+            if fresh.get("status") != stored.get("status") or _check_states(fresh) != _check_states(stored):
+                stored["recalculation"] = {"status": fresh.get("status"), "met": fresh.get("met"), "checks": fresh.get("checks", [])}
         return stored
     track = cycle.relationship.supervision_track
     if track == SupervisionTrack.SUPERVISED_FIELDWORK:
@@ -769,16 +850,30 @@ def relationship_compliance(relationship, cycles):
     months = []
     if track == SupervisionTrack.SUPERVISED_FIELDWORK:
         eligible = []
+        by_standard_months = {s: [] for s in ("bacb_2022", "bacb_2027")}
         last_rules = None
+        standards = fieldwork_standards(relationship)
         for cycle in cycles:
             rules_by_standard = _fieldwork_rules(relationship, cycle)
-            last_rules = rules_by_standard[fieldwork_standards(relationship)[-1]]
+            last_rules = rules_by_standard[standards[-1]]
             stored = _snapshot_result(cycle)
             if stored:
-                result, source = {**stored, "_eligible": _dec(stored.get("eligible_hours"))}, stored.get("rules") or {}
+                stored_by = stored.get("by_standard") or {}
+                if len(standards) == 1 and stored.get("standard") == "both" and standards[0] in stored_by:
+                    # Verified while the standard was undetermined; now that it is set, the month uses that
+                    # standard's own stored result, so hours eligible under it are never lost to the other one
+                    result = {**stored_by[standards[0]], "standard": standards[0], "snapshot": stored.get("snapshot"),
+                              "verified_while_undetermined": True}
+                    result["_eligible"] = _dec(result.get("eligible_hours"))
+                else:
+                    result = {**stored, "_eligible": _dec(stored.get("eligible_hours"))}
+                source = stored.get("rules") or {}
             else:
                 result, source = _fieldwork_result(cycle, rules_by_standard)
                 source.pop("parameters_by_standard", None)
+            per_standard = result.get("eligible_by_standard") or {}
+            for s in by_standard_months:
+                by_standard_months[s].append((result["fieldwork_type"], _dec(per_standard.get(s, result["_eligible"]))))
             eligible.append((result["fieldwork_type"], result.pop("_eligible")))
             months.append({"cycle_id": str(cycle.id), "year": cycle.year, "month": cycle.month,
                            **result, "rules": source})
@@ -802,6 +897,8 @@ def relationship_compliance(relationship, cycles):
                 "year": month["year"], "month": month["month"], "fieldwork_type": fieldwork_type,
                 "verified_hours": _out(logged), "counted_hours": _out(_dec(counted)),
                 "reasons": [adjustment["detail"] for adjustment in month.get("adjustments", [])],
+                # While the standard is undetermined: this month's eligible hours under each standard
+                "eligible_by_standard": month.get("eligible_by_standard"),
             })
         verified_total = sum(verified_by_type.values(), ZERO)
         counted_total = _dec(cumulative["supervised_hours"]) + _dec(cumulative["concentrated_hours"])
@@ -810,8 +907,20 @@ def relationship_compliance(relationship, cycles):
             "verified_concentrated_hours": _out(verified_by_type[FieldworkSubtype.CONCENTRATED]),
             "not_counted_hours": _out(max(ZERO, verified_total - counted_total)),
             "by_month": breakdown,
-            "standards": fieldwork_standards(relationship),
+            "standards": standards,
         })
+        if len(standards) > 1:
+            # Progress under each standard on its own, so the eventual standard's full count is always visible
+            cumulative["provisional"] = True
+            cumulative["by_standard"] = {}
+            for s in standards:
+                rules_s = _fieldwork_rules(relationship, cycles[-1])[s] if cycles else default_rules(track)
+                own = evaluate_fieldwork_cumulative(rules_s, by_standard_months[s], unrestricted_hours=verified["unrestricted"],
+                                                    accrued_hours=verified["total"])
+                cumulative["by_standard"][s] = {k: own[k] for k in ("supervised_hours", "concentrated_hours", "combined_hours",
+                                                                    "required_supervised_hours", "percent_complete", "complete")}
+            cumulative["pending_standard_hours"] = _out(
+                abs(_dec(cumulative["by_standard"]["bacb_2022"]["combined_hours"]) - _dec(cumulative["by_standard"]["bacb_2027"]["combined_hours"])))
         return {"track": track, "months": months, "cumulative": cumulative}
 
     if track in (SupervisionTrack.RBT_ONGOING, SupervisionTrack.BCABA_ONGOING):

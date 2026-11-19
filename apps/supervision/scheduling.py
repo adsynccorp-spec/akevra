@@ -144,6 +144,16 @@ def serialize_slot(slot):
             "starts_at": slot.starts_at.strftime("%H:%M"), "ends_at": slot.ends_at.strftime("%H:%M")}
 
 
+def _lock_people(relationship):
+    """Serializes bookings for the two people, so two simultaneous submissions (a double click, two tabs, a batch
+    and a single booking) can't both pass the conflict check and create duplicate appointments. Call inside a
+    transaction."""
+    from apps.accounts.models import UserAccount
+
+    list(UserAccount.objects.select_for_update().filter(
+        pk__in=[relationship.supervisor_id, relationship.supervisee_id]).order_by("pk").values_list("pk", flat=True))
+
+
 def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_weeks=0, **fields):
     """One appointment, or a weekly batch (`repeat_weeks` more after the first) sharing a series id."""
     try:
@@ -158,6 +168,7 @@ def schedule_appointments(relationship, actor, *, starts_at, ends_at, repeat_wee
     created = []
     self_scheduled = actor.id == relationship.supervisee_id
     with transaction.atomic():
+        _lock_people(relationship)
         for week in range(repeat_weeks + 1):
             if ends_at > starts_at:
                 check_conflicts(relationship, starts_at + timedelta(weeks=week), ends_at + timedelta(weeks=week))
@@ -196,14 +207,15 @@ def reschedule(appointment, actor, *, starts_at=None, ends_at=None, reason="", *
         appointment.starts_at = starts_at
     if ends_at:
         appointment.ends_at = ends_at
-    if moved and appointment.ends_at > appointment.starts_at:
-        check_conflicts(appointment.relationship, appointment.starts_at, appointment.ends_at, exclude=appointment)
-        if actor.id == appointment.relationship.supervisee_id:
-            check_available(appointment.relationship, appointment.starts_at, appointment.ends_at)
     for key, value in fields.items():
         if key in APPOINTMENT_FIELDS and value is not None:
             setattr(appointment, key, value)
     with transaction.atomic():
+        if moved and appointment.ends_at > appointment.starts_at:
+            _lock_people(appointment.relationship)
+            check_conflicts(appointment.relationship, appointment.starts_at, appointment.ends_at, exclude=appointment)
+            if actor.id == appointment.relationship.supervisee_id:
+                check_available(appointment.relationship, appointment.starts_at, appointment.ends_at)
         if moved:
             appointment.status = AppointmentStatus.SCHEDULED
         appointment.save()
