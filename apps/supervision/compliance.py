@@ -481,7 +481,9 @@ def _rules_pending(track):
 
 
 def _fieldwork_month_for(cycle, rules):
-    verified = cycle.hours_entries.filter(status=HoursStatus.VERIFIED, record_status="active")
+    # A verified entry dated after today never counts before its date (records verified before the date check)
+    verified = cycle.hours_entries.filter(status=HoursStatus.VERIFIED, record_status="active",
+                                          occurred_on__lte=organization_today(cycle.organization))
     supervision_rows = verified.filter(kind=HoursKind.SUPERVISION)
     totals = verified.aggregate(total_hours=Sum("hours"))
     supervision = supervision_rows.aggregate(
@@ -884,7 +886,8 @@ def relationship_compliance(relationship, cycles):
                            **result, "rules": source})
         rules = last_rules or default_rules(track)
         verified = HoursEntry.objects.filter(
-            cycle__relationship=relationship, status=HoursStatus.VERIFIED, record_status="active"
+            cycle__relationship=relationship, status=HoursStatus.VERIFIED, record_status="active",
+            occurred_on__lte=organization_today(relationship.organization),
         ).aggregate(
             total=Sum("hours"), unrestricted=Sum("hours", filter=Q(activity_category="unrestricted"))
         )

@@ -25,6 +25,7 @@ import uuid
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -62,7 +63,8 @@ FIELDS = {
     SessionDocKind.SUPERVISOR_NOTE: tuple(key for key, _ in NOTE_SECTIONS),
     SessionDocKind.SUPERVISEE_FEEDBACK: ("strengths", "improvements", "coaching", "follow_up"),
 }
-NOT_DOCUMENTED = "Not documented."
+# A section the answers don't cover is left empty, and empty sections are left out of the note shown and copied
+NOT_DOCUMENTED = ""
 SESSION_RECORD_FIELDS = ("topics", "activities", "feedback", "follow_up", "notes")
 MAX_ANSWER = 4000
 MAX_FIELD = 6000
@@ -169,7 +171,8 @@ Draft %(what)s.
      Clearly separate what was only discussed from changes actually approved or implemented.
   "follow_up_next_focus": agreed assignments and action steps (with who is responsible when stated) and the
      priorities for the next supervision session.
-  Write "Not documented." for a section the information below doesn't cover.
+  Leave a section as an empty string "" when the information below doesn't cover it (it is then left out of the
+  note); never fill a section with filler such as "Not documented." or "N/A".
 - "supervisee_feedback": a supportive summary written to the supervisee, with four parts: strengths observed,
   areas to improve, the coaching given, and follow-up actions.
 
@@ -439,6 +442,34 @@ def _output_data(output, *, full):
     return data
 
 
+def previous_session(session):
+    """The relationship's most recent earlier completed session that has approved documentation: its approved
+    feedback and its follow-up actions, shown at the top of this session's documentation so the supervisor doesn't
+    have to open another page. Only approved text is shown (drafts never are)."""
+    from apps.supervision.models import SupervisionSession
+
+    earlier = (SupervisionSession.objects
+               .filter(cycle__relationship_id=session.cycle.relationship_id, status="completed", record_status="active",
+                       documentation__outputs__status=SessionDocStatus.APPROVED)
+               .filter(Q(occurred_on__lt=session.occurred_on) | Q(occurred_on=session.occurred_on, created_at__lt=session.created_at))
+               .exclude(pk=session.pk).order_by("-occurred_on", "-created_at").distinct().first())
+    if earlier is None:
+        return None
+    outputs = {o.kind: o for o in SessionDocOutput.objects.filter(documentation__session=earlier, status=SessionDocStatus.APPROVED)}
+    feedback = outputs.get(SessionDocKind.SUPERVISEE_FEEDBACK)
+    note = outputs.get(SessionDocKind.SUPERVISOR_NOTE)
+    follow_up = [text for text in (
+        (note.content or {}).get("follow_up_next_focus") if note else "",
+        (feedback.content or {}).get("follow_up") if feedback else "",
+    ) if (text or "").strip()]
+    return {
+        "session_id": str(earlier.id), "occurred_on": earlier.occurred_on.isoformat(),
+        "feedback": None if feedback is None else {"content": feedback.content, "approved_at": _at(feedback.approved_at),
+                                                   "acknowledged_at": _at(feedback.acknowledged_at)},
+        "follow_up": follow_up,
+    }
+
+
 def serialize(session, viewer):
     """Supervisor of record: everything. The relationship's supervisee: the approved feedback only.
     Anyone else who may view the session (oversight): status only, no text."""
@@ -452,6 +483,8 @@ def serialize(session, viewer):
             "note_sections": [{"key": k, "label": label} for k, label in NOTE_SECTIONS] if supervisor or reviewer else [],
             "can_document": supervisor, "can_review": reviewer, "can_acknowledge": False,
             "generator": ai.generator_info(_relationship(session).organization) if supervisor else None}
+    if supervisor or reviewer:
+        base["previous"] = previous_session(session)
     if documentation is None:
         extra = {"prefill": prefill(session)} if supervisor else {}
         return {**base, "exists": False, "outputs": {}, **extra}

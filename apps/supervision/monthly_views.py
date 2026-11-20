@@ -606,9 +606,10 @@ class SessionListView(APIView):
         qs = list(qs.select_related("cycle__relationship"))
         can_document = has_permission(request.user_account, "session.document", relationship=rel)
         flags = monthly.review_flags(qs) if can_document else {}
+        notes = _note_statuses(qs)
         return Response({
             "can_document": can_document,
-            "sessions": [monthly.serialize_session(s, flags.get(s.pk, [])) for s in qs],
+            "sessions": [{**monthly.serialize_session(s, flags.get(s.pk, [])), "note_status": notes[s.pk]} for s in qs],
             "archived_count": SupervisionSession.objects.filter(cycle__relationship=rel, record_status="archived").count() if auditor else 0,
         })
 
@@ -633,6 +634,17 @@ class SessionListView(APIView):
         if session.status == SessionStatus.COMPLETED:
             notifications.session_documented(session, request.user_account)
         return Response(monthly.serialize_session(_session(session.id)), status=status.HTTP_201_CREATED)
+
+
+def _note_statuses(sessions):
+    """The guided Supervisor Note's state per session: "approved", "draft" (drafted, not approved) or "not_started"."""
+    from apps.supervision.models import SessionDocOutput
+
+    ids = [s.pk for s in sessions]
+    rows = SessionDocOutput.objects.filter(documentation__session_id__in=ids, kind="supervisor_note").values_list(
+        "documentation__session_id", "status")
+    found = {sid: ("approved" if status == "approved" else "draft") for sid, status in rows}
+    return {sid: found.get(sid, "not_started") for sid in ids}
 
 
 def _without_files(request):
@@ -908,10 +920,12 @@ class AllSessionsView(APIView):
         documentable = {rel_id for rel_id, rel in rels.items() if has_permission(me, "session.document", relationship=rel)}
         qs = list(qs.select_related("cycle__relationship"))
         flags = monthly.review_flags([s for s in qs if s.cycle.relationship_id in documentable])
+        notes = _note_statuses(qs)
         return Response({
             "documentable_relationships": [_relationship_summary(rels[rel_id]) for rel_id in rels if rel_id in documentable],
             "sessions": [
-                {**monthly.serialize_session(s, flags.get(s.pk, [])), "relationship": _relationship_summary(rels[s.cycle.relationship_id])}
+                {**monthly.serialize_session(s, flags.get(s.pk, [])), "note_status": notes[s.pk],
+                 "relationship": _relationship_summary(rels[s.cycle.relationship_id])}
                 for s in qs
             ],
         })

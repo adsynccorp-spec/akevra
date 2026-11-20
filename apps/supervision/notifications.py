@@ -149,11 +149,58 @@ def maybe_send_preparation_reminders(organization_id, every_minutes=2):
     if last and (now - last).total_seconds() < every_minutes * 60:
         return 0
     _last_reminder_run[organization_id] = now
+    sent = 0
     try:
-        return send_preparation_reminders(now=now, organization_id=organization_id)
+        sent += send_preparation_reminders(now=now, organization_id=organization_id)
     except Exception:  # noqa: BLE001 - never break the request that triggered it
         logger.exception("Preparation reminder check failed")
-        return 0
+    try:
+        sent += send_documentation_reminders(now=now, organization_id=organization_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Documentation reminder check failed")
+    return sent
+
+
+def send_documentation_reminders(now=None, after_hours=24, lookback_days=14, organization_id=None):
+    """Remind the Supervisor, once per item, about documentation still pending `after_hours` after the session:
+    a held appointment with no session record, or a completed session whose Supervisor Note isn't approved yet.
+    Only recent sessions (`lookback_days`) are considered, so records from before guided documentation don't
+    trigger reminders."""
+    from apps.supervision.models import Appointment, AppointmentStatus, SessionDocKind, SessionDocStatus, SupervisionSession
+
+    now = now or timezone.now()
+    due_before = now - timedelta(hours=after_hours)
+    since = now - timedelta(days=lookback_days)
+    sent = 0
+    held = Appointment.objects.select_related("relationship__supervisor", "relationship__supervisee").filter(
+        status=AppointmentStatus.COMPLETED, record_status="active", ends_at__lte=due_before, ends_at__gte=since,
+    ).exclude(session_records__record_status="active")
+    if organization_id:
+        held = held.filter(organization_id=organization_id)
+    for appointment in held:
+        if Notification.objects.filter(appointment=appointment, kind="documentation_reminder").exists():
+            continue
+        rel = appointment.relationship
+        notify(rel.supervisor, "documentation_reminder", f"Documentation pending: session with {rel.supervisee.full_name} on {_when(appointment)}",
+               body="This session was held but hasn't been documented yet. Open it to record the session.",
+               relationship=rel, tab="sessions", appointment=appointment, email=True)
+        sent += 1
+    sessions = SupervisionSession.objects.select_related("cycle__relationship__supervisor", "cycle__relationship__supervisee").filter(
+        status="completed", record_status="active", created_at__lte=due_before, created_at__gte=since,
+    ).exclude(documentation__outputs__kind=SessionDocKind.SUPERVISOR_NOTE, documentation__outputs__status=SessionDocStatus.APPROVED)
+    if organization_id:
+        sessions = sessions.filter(organization_id=organization_id)
+    for session in sessions.distinct():
+        rel = session.cycle.relationship
+        link = f"/dashboard/relationships/{rel.id}?tab=sessions&open={session.id}"
+        if Notification.objects.filter(kind="documentation_reminder", link=link).exists():
+            continue
+        notify(rel.supervisor, "documentation_reminder",
+               f"Resume Draft: note for {rel.supervisee.full_name}'s session on {session.occurred_on:%b %d, %Y}",
+               body="The Supervisor Note and Supervisee Feedback for this session are not approved yet.",
+               relationship=rel, link=link, email=True)
+        sent += 1
+    return sent
 
 
 def send_preparation_reminders(now=None, window_hours=48, organization_id=None):

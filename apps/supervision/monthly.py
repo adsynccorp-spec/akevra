@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -280,6 +281,17 @@ def _require_track(relationship, tracks, message):
         raise ValidationError(message)
 
 
+def ensure_hours_not_future(relationship, occurred_on):
+    """Completed fieldwork hours can't be dated after today. "Today" is the organization's local date (its time
+    zone), the same date the trainee sees, so an evening entry is never rejected or accepted because of UTC."""
+    today = organization_today(relationship.organization)
+    if occurred_on and occurred_on > today:
+        raise ValidationError(
+            f"The date worked ({occurred_on:%b %d, %Y}) is in the future. Hours can only be logged for work already "
+            f"completed, on or before today ({today:%b %d, %Y})."
+        )
+
+
 def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, supervision_format="",
                         client_observation=False, observation_minutes=None, notes="", activity_category="unrestricted"):
     _require_track(
@@ -290,6 +302,12 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
     )
     if not occurred_on:
         raise ValidationError("The date worked is required.")
+    if isinstance(occurred_on, str):
+        try:
+            occurred_on = date.fromisoformat(occurred_on)
+        except ValueError:
+            raise ValidationError("Enter the date worked as YYYY-MM-DD.") from None
+    ensure_hours_not_future(relationship, occurred_on)
     if client_observation and observation_minutes in (None, ""):
         # BACB 2027 counts observation by duration, so new observations record their minutes
         raise ValidationError("Enter how many minutes of this supervision were spent observing you with a client.")
@@ -299,7 +317,7 @@ def log_fieldwork_hours(relationship, actor, *, occurred_on, hours, kind, superv
         organization=relationship.organization,
         cycle=cycle,
         occurred_on=occurred_on,
-        attested_on=timezone.localdate(),
+        attested_on=organization_today(relationship.organization),
         hours=parse_decimal(hours, "Hours"),
         kind=kind,
         activity_category=activity_category or "unrestricted",
@@ -328,9 +346,10 @@ def correct_fieldwork_hours(entry, **changes):
         ensure_open(entry.cycle, "hours")
     if entry.client_observation and entry.observation_minutes is None:
         raise ValidationError("Enter how many minutes of this supervision were spent observing you with a client.")
+    ensure_hours_not_future(entry.cycle.relationship, entry.occurred_on)
     entry.status = HoursStatus.PENDING
     entry.return_reason = ""
-    entry.attested_on = timezone.localdate()
+    entry.attested_on = organization_today(entry.organization)
     entry.save()
     return entry
 
@@ -339,6 +358,11 @@ def verify_fieldwork_hours(entry, actor):
     if entry.status != HoursStatus.PENDING:
         raise ValidationError("Only hours waiting for review can be verified.")
     ensure_open(entry.cycle, "hours")
+    if entry.occurred_on > organization_today(entry.organization):
+        raise ValidationError(
+            f"These hours are dated {entry.occurred_on:%b %d, %Y}, which hasn't happened yet, so they can't be verified. "
+            "Return them to the trainee to correct the date worked."
+        )
     entry.status = HoursStatus.VERIFIED
     entry.verified_by = actor
     entry.verified_at = timezone.now()
@@ -768,6 +792,8 @@ def serialize_hours(entry):
         "logged_by": _person(entry.logged_by),
         "verified_by": _person(entry.verified_by),
         "verified_at": entry.verified_at.isoformat() if entry.verified_at else None,
+        # Dated after today (organization's local date): can't be verified and never counts before that date
+        "future_dated": entry.occurred_on > organization_today(entry.organization),
     }
 
 
@@ -847,7 +873,9 @@ def serialize_cycle(cycle, *, compliance=None, detail=False):
             "assignments_completed": sum(1 for a in assignments if a.status == AssignmentStatus.COMPLETED),
             "hours_entries": len(hours),
             "hours_logged": float(sum((h.hours for h in hours), Decimal("0"))),
-            "hours_verified": float(sum((h.hours for h in hours if h.status == HoursStatus.VERIFIED), Decimal("0"))),
+            # Verified hours dated after today aren't counted until their date
+            "hours_verified": float(sum((h.hours for h in hours if h.status == HoursStatus.VERIFIED
+                                         and h.occurred_on <= organization_today(cycle.organization)), Decimal("0"))),
             "sessions": len(sessions),
             "session_minutes": sum(s.duration_minutes for s in sessions),
         },
