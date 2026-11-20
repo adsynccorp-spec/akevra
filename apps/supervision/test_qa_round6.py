@@ -185,3 +185,58 @@ class SessionWorkflowRefinementTests(TestCase):
         self.assertIn(pending, reminder.link)
         self.assertEqual(send_documentation_reminders(now=later), 0)          # once only
         self.assertEqual(send_documentation_reminders(now=timezone.now()), 0)  # not before 24 hours
+
+
+class SingleEntryTests(TestCase):
+    """A1: what happened is written once, as the guided answers; the session record keeps time, method and type."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_sprint0", verbosity=0)
+        cls.jordan = UserAccount.objects.get(email="jordan@akevra.test")
+        cls.alex = UserAccount.objects.get(email="alex@akevra.test")
+        cls.rbt = SupervisoryRelationship.objects.get(supervisor=cls.jordan, supervisee=cls.alex)
+
+    def setUp(self):
+        from apps.supervision import ai
+        patcher = mock.patch.object(ai, "_api_key", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.c = FutureDatedHoursTests.as_user(self, "jordan@akevra.test")
+        self.url = f"/api/v1/relationships/{self.rbt.id}/sessions"
+        self.base = {"occurred_on": "2026-10-06", "start_time": "10:00", "end_time": "11:00", "session_type": "individual",
+                     "meeting_method": "in_person"}
+
+    def test_guided_answers_are_the_only_narrative_entry(self):
+        from apps.supervision.models import SupervisionSession
+
+        nothing = self.c.post(self.url, self.base, format="json")
+        self.assertEqual(nothing.status_code, 400)
+        self.assertIn("what happened", str(nothing.data))
+        made = self.c.post(self.url, {**self.base, "observed": "Accurate prompting during DTT",
+                                      "feedback_given": "Modelled faster data recording",
+                                      "changes_assigned": "Record data within the trial", "next_focus": "Data timing"}, format="json")
+        self.assertEqual(made.status_code, 201, made.data)
+        session = SupervisionSession.objects.get(pk=made.data["id"])
+        # The record keeps time, method and type only; the narrative lives once, in the guided answers
+        self.assertEqual((session.topics, session.activities, session.feedback, session.follow_up), ("", "", "", ""))
+        self.assertEqual((session.status, str(session.start_time)[:5], session.meeting_method), ("completed", "10:00", "in_person"))
+        doc = self.c.get(f"/api/v1/sessions/{session.id}/documentation").data
+        self.assertTrue(doc["exists"])
+        self.assertEqual(doc["answers"]["observed"], "Accurate prompting during DTT")
+        self.assertNotIn("prefill", doc)
+        drafted = self.c.post(f"/api/v1/sessions/{session.id}/documentation/generate", {}, format="json")
+        self.assertEqual(drafted.status_code, 200)
+        self.assertIn("Accurate prompting", drafted.data["outputs"]["supervisor_note"]["content"]["observations"])
+        listed = {s["id"]: s for s in self.c.get(self.url).data["sessions"]}
+        self.assertEqual(listed[str(session.id)]["review_flags"], [])     # documented, so not flagged
+
+    def test_a_draft_keeps_its_answers_and_completes_without_retyping(self):
+        draft = self.c.post(self.url, {**self.base, "occurred_on": "2026-10-08", "draft": True,
+                                       "observed": "Observed two DTT programs"}, format="json")
+        self.assertEqual(draft.status_code, 201, draft.data)
+        doc = self.c.get(f"/api/v1/sessions/{draft.data['id']}/documentation").data
+        self.assertEqual(doc["answers"]["observed"], "Observed two DTT programs")
+        done = self.c.patch(f"/api/v1/sessions/{draft.data['id']}", {"complete": True}, format="json")
+        self.assertEqual(done.status_code, 200, done.data)
+        self.assertEqual(done.data["status"], "completed")

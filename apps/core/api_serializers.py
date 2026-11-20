@@ -220,6 +220,11 @@ class SessionCreateSerializer(serializers.Serializer):
     feedback = serializers.CharField(required=False, allow_blank=True)
     follow_up = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+    # Single entry: what happened is written once, as the guided documentation answers saved with the record
+    observed = serializers.CharField(required=False, allow_blank=True, help_text="Guided: what did you observe?")
+    feedback_given = serializers.CharField(required=False, allow_blank=True, help_text="Guided: feedback, coaching or modelling given")
+    changes_assigned = serializers.CharField(required=False, allow_blank=True, help_text="Guided: changes or new tasks assigned")
+    next_focus = serializers.CharField(required=False, allow_blank=True, help_text="Guided: focus for next time")
     files = serializers.ListField(child=serializers.FileField(), required=False, help_text="Up to 5 files, multipart/form-data")
     draft = serializers.BooleanField(required=False, default=False, help_text="Save without completing; drafts never count")
 

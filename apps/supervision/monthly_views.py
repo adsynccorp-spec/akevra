@@ -623,9 +623,11 @@ class SessionListView(APIView):
         serializer = SessionCreateSerializer(data=_without_files(request))
         if not serializer.is_valid():
             return _invalid(serializer)
+        data = dict(serializer.validated_data)
+        guided = {k: data.pop(k) for k in monthly.GUIDED_KEYS if k in data}
         try:
             session = monthly.document_session(rel, request.user_account, files=request.FILES.getlist("files"),
-                                               **serializer.validated_data)
+                                               guided=guided, **data)
         except ValidationError as exc:
             return _bad_request(exc)
         action = "session.draft" if session.status == SessionStatus.DRAFT else "session.document"
@@ -695,9 +697,10 @@ class SessionDetailView(APIView):
             return _invalid(serializer)
         data = dict(serializer.validated_data)
         complete = data.pop("complete", False)
+        guided = {k: data.pop(k) for k in monthly.GUIDED_KEYS if k in data}
         try:
             monthly.update_session(session, request.user_account, complete=complete,
-                                   files=request.FILES.getlist("files"), **data)
+                                   files=request.FILES.getlist("files"), guided=guided, **data)
         except ValidationError as exc:
             return _bad_request(exc)
         write_audit(action="session.document" if complete else "session.draft_update", entity_type="supervision_session",

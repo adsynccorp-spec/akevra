@@ -508,14 +508,31 @@ def ensure_not_duplicate(session):
 NARRATIVE_FIELDS = ("topics", "activities", "feedback", "follow_up", "notes")
 
 
-def ensure_complete_record(session):
+GUIDED_KEYS = ("observed", "feedback_given", "changes_assigned", "next_focus")
+
+
+def _guided_answers(session):
+    from apps.supervision.models import SessionDocumentation
+
+    if not session.pk:
+        return {}
+    doc = SessionDocumentation.objects.filter(session_id=session.pk).first()
+    return {key: getattr(doc, key) for key in GUIDED_KEYS} if doc else {}
+
+
+def ensure_complete_record(session, guided=None):
     """What a completed (compliance-bearing) record must have: the meeting method (whether it can count depends
-    on it) and documentation of what happened. A record without them stays a draft and never counts."""
+    on it) and documentation of what happened. Single entry: what happened is written once, in the guided
+    documentation answers; records created before that keep their own narrative fields, which also qualify.
+    A record without them stays a draft and never counts."""
     missing = []
     if not session.meeting_method:
         missing.append("the meeting method")
-    if not any((getattr(session, f) or "").strip() for f in NARRATIVE_FIELDS):
-        missing.append("what happened in the session (topics, activities, feedback, follow-up or notes)")
+    answers = {**_guided_answers(session), **(guided or {})}
+    documented = any((getattr(session, f) or "").strip() for f in NARRATIVE_FIELDS) \
+        or any((answers.get(k) or "").strip() for k in ("observed", "feedback_given"))
+    if not documented:
+        missing.append("what happened in the session (what you observed, or the feedback and coaching you gave)")
     if missing:
         raise ValidationError(
             "A completed session record needs " + ", ".join(missing)
@@ -644,8 +661,16 @@ def ensure_not_future(session):
         )
 
 
-def document_session(relationship, actor, *, draft=False, files=(), appointment_id=None, **fields):
-    """A completed record counts toward requirements; a draft doesn't until it is completed."""
+def _save_guided(session, actor, guided):
+    if guided:
+        from apps.supervision import session_docs
+
+        session_docs.save_answers(session, actor, guided)
+
+
+def document_session(relationship, actor, *, draft=False, files=(), appointment_id=None, guided=None, **fields):
+    """A completed record counts toward requirements; a draft doesn't until it is completed. `guided` holds the
+    guided documentation answers (what happened), saved with the record so nothing is entered twice."""
     from apps.supervision.scheduling import link_session
 
     session = SupervisionSession(organization=relationship.organization, documented_by=actor)
@@ -653,7 +678,7 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
     session.cycle = cycle_for_date(relationship, session.occurred_on)
     session.status = SessionStatus.DRAFT if draft else SessionStatus.COMPLETED
     if not draft:
-        ensure_complete_record(session)
+        ensure_complete_record(session, guided)
         ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
     with transaction.atomic():
@@ -663,11 +688,12 @@ def document_session(relationship, actor, *, draft=False, files=(), appointment_
         if appointment_id:
             link_session(session, _appointment(appointment_id))
         session.save()
+        _save_guided(session, actor, guided)
         _save_session_files(session, actor, files)
     return session
 
 
-def update_session(session, actor, *, complete=False, files=(), appointment_id=None, **fields):
+def update_session(session, actor, *, complete=False, files=(), appointment_id=None, guided=None, **fields):
     """Edit a draft, optionally completing it. Completed records are never edited."""
     from apps.supervision.scheduling import link_session
 
@@ -679,7 +705,7 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
     if (session.occurred_on.year, session.occurred_on.month) != (session.cycle.year, session.cycle.month):
         session.cycle = cycle_for_date(session.cycle.relationship, session.occurred_on)
     if complete:
-        ensure_complete_record(session)
+        ensure_complete_record(session, guided)
         ensure_not_future(session)
         ensure_open(session.cycle, "supervision sessions")
     with transaction.atomic():
@@ -688,6 +714,7 @@ def update_session(session, actor, *, complete=False, files=(), appointment_id=N
             ensure_not_duplicate(session)
             session.status = SessionStatus.COMPLETED
         session.save()
+        _save_guided(session, actor, guided)
         _save_session_files(session, actor, files)
     return session
 
